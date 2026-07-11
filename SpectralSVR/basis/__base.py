@@ -193,6 +193,7 @@ class Basis(abc.ABC):
         res: tuple[slice, ...],
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        res_t = None
         if self.time_dependent:
             assert len(res) > 1, (
                 "res list should be more than one element for time dependent coefficients"
