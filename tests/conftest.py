@@ -1,6 +1,6 @@
-"""Policy enforcement for the basis test suite.
+"""Testing-policy enforcement for the whole suite.
 
-Every test in this package must:
+Every test must:
 
 1. Be fuzzed with Hypothesis (``@given``) OR explicitly opt out with
    ``@pytest.mark.no_fuzz``.

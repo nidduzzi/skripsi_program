@@ -7,10 +7,15 @@ from SpectralSVR import (
     Antiderivative,
     LSSVR,
 )
+import pytest
 import torch
 from torch.utils.data.dataset import TensorDataset
 from torch.utils.data import random_split
 from torchmetrics.functional import symmetric_mean_absolute_percentage_error
+
+# End-to-end scenario: manufactured antiderivative operator (MMS), single
+# fixed configuration rather than a fuzzed one.
+pytestmark = [pytest.mark.mms, pytest.mark.no_fuzz]
 
 
 def test_SpectralSVR():
