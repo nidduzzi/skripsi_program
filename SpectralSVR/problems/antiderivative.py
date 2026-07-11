@@ -32,7 +32,7 @@ class Antiderivative(Problem):
             assert m > 0, f"number of modes m must be more than 0 at dim {i}"
         assert u0 is not None, "integration constant u0 must not be None"
         # generate solution functions
-        u = basis.generate(n, modes, **{**kwargs, "generator": generator})
+        u = basis.generate(n, modes, generator=generator, **kwargs)
         assert u.coeff is not None, (
             "generated solution functions u should not have None coeff"
         )

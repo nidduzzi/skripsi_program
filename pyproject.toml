@@ -5,39 +5,39 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "matplotlib>=3.10.6",
-    "numpy>=2.3.2",
-    "pandas>=2.3.2",
-    "torch>=2.8.0",
-    "torchdiffeq>=0.2.5",
-    "torchmetrics>=1.8.1",
-    "torchvision>=0.23.0",
-    "tqdm>=4.67.1",
+    "matplotlib>=3.11.0,<4",
+    "numpy>=2.4.6,<3",
+    "pandas>=3.0.3,<4",
+    "torch>=2.11.0,<3",
+    "torchdiffeq>=0.2.5,<0.3",
+    "torchmetrics>=1.9.0,<2",
+    "torchvision>=0.26.0,<0.27",
+    "tqdm>=4.68.4,<5",
 ]
 authors = [{ name = "nidduzzi", email = "74892632+nidduzzi@users.noreply.github.com" }]
 
 [project.optional-dependencies]
 notebook = [
-    "ipykernel>=6.30.1",
-    "ray[tune]>=2.49.0",
-    "hyperopt>=0.2.7",
-    "xarray>=2025.8.0",
-    "zarr>=3.1.2",
-    "gcsfs>=2025.7.0",
-    "ipywidgets>=8.1.7",
-    "scikit-learn>=1.7.1",
+    "ipykernel>=7.3.0,<8",
+    "ray[tune]>=2.56.0,<3",
+    "hyperopt>=0.2.7,<0.3",
+    "xarray>=2026.7.0,<2027",
+    "zarr>=3.1.6,<4",
+    "gcsfs>=2026.7.0,<2027",
+    "ipywidgets>=8.1.8,<9",
+    "scikit-learn>=1.9.0,<2",
 ]
 
 lint = [
-    "mypy>=1.17.1",
-    "ruff>=0.12.11",
-    "ty>=0.0.58",
+    "mypy>=2.2.0,<3",
+    "ruff>=0.15.21,<0.16",
+    "ty>=0.0.58,<0.1",
 ]
 test = [
-    "memory-profiler>=0.61.0",
-    "pytest>=8.4.1",
-    "hypothesis>=6.100.0",
-    "coverage>=7.6.0",
+    "memory-profiler>=0.61.0,<0.62",
+    "pytest>=9.1.1,<10",
+    "hypothesis>=6.156.6,<7",
+    "coverage>=7.15.0,<8",
 ]
 
 [tool.uv.sources]
@@ -76,7 +76,12 @@ exclude_also = [
 ]
 
 [tool.mypy]
-python_version = "3.11"
+# 3.12+: the pinned numpy's type stubs use PEP 695 `type` statements.
+python_version = "3.12"
+
+[[tool.mypy.overrides]]
+module = ["torchdiffeq.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 target-version = "py311"

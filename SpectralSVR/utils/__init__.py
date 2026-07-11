@@ -2,7 +2,7 @@ import torch
 import logging
 import typing
 from typing import Callable
-from torchdiffeq import odeint  # type: ignore
+from torchdiffeq import odeint
 from functools import partial
 from torchmetrics.functional.regression import (
     mean_squared_error,
@@ -395,8 +395,8 @@ def euler_solver(
 
 implicit_adams_solver: SolverSignatureType = partial(
     odeint, method="implicit_adams", options={"max_iters": 4}
-)  # type: ignore
+)
 
 lsoda_solver: SolverSignatureType = partial(
     odeint, method="scipy_solver", options={"solver": "LSODA"}
-)  # type: ignore
+)

@@ -1,5 +1,4 @@
 import abc
-import codecs
 import json
 from typing import Callable, overload, Any
 
@@ -30,7 +29,8 @@ def dump_model(
 
 def load_model(filepath: str = "model") -> dict[str, Any]:
     helper_filepath = filepath if filepath.endswith(".json") else f"{filepath}.json"
-    file_text = codecs.open(helper_filepath, "r", encoding="utf-8").read()
+    with open(helper_filepath, "r", encoding="utf-8") as fp:
+        file_text = fp.read()
     model_json = json.loads(file_text)
 
     return model_json
