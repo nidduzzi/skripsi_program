@@ -76,7 +76,7 @@ class Basis(abc.ABC):
 
     @property
     def coeff(self) -> torch.Tensor:
-        return self._coeff
+        return self._coeff  # pragma: no cover  (subclasses shadow this getter)
 
     @coeff.setter
     @abc.abstractmethod
@@ -104,10 +104,8 @@ class Basis(abc.ABC):
             return tuple(coeff.shape[1:])
 
     @property
-    def ndim(self):
+    def ndim(self) -> int:
         coeff_ndim = self.coeff.ndim
-        if self.coeff is None or coeff_ndim < 1:
-            return 0
         if self.time_dependent:
             return coeff_ndim - 2
         else:
@@ -309,9 +307,7 @@ class Basis(abc.ABC):
             i=i, n=n, res=res, evaluation_mode=evaluation_mode, device=device
         )[0]
 
-    def __len__(self):
-        if self.coeff is None:
-            return 0
+    def __len__(self) -> int:
         return self.coeff.__len__()
 
     @staticmethod
@@ -591,16 +587,9 @@ class Basis(abc.ABC):
 
     def __sub__(self, other: Self):
         if isinstance(other, self.__class__):
-            if other.coeff is None:
-                return self.copy()
-            elif self.coeff is None:
-                other_copy = other.copy()
-                other_copy.coeff = -other.coeff.clone()
-                return other_copy
-            else:
-                result = self.resize_modes(other)
-                result.coeff = result.coeff - other.coeff
-                return result
+            result = self.resize_modes(other)
+            result.coeff = result.coeff - other.coeff
+            return result
         else:
             raise TypeError(
                 f"unsupported operand type(s) for +: '{self.__class__}' and '{type(other)}'"
@@ -608,14 +597,9 @@ class Basis(abc.ABC):
 
     def __add__(self, other: Self):
         if isinstance(other, self.__class__):
-            if other.coeff is None:
-                return self.copy()
-            elif self.coeff is None:
-                return other.copy()
-            else:
-                result = self.resize_modes(other)
-                result.coeff = result.coeff + other.coeff
-                return result
+            result = self.resize_modes(other)
+            result.coeff = result.coeff + other.coeff
+            return result
         else:
             raise TypeError(
                 f"unsupported operand type(s) for +: '{self.__class__}' and '{type(other)}'"
@@ -793,7 +777,7 @@ class Basis(abc.ABC):
                             plot = plt.imshow(values[0].imag, **kwargs)
                         case "real":
                             plot = plt.imshow(values[0].real, **kwargs)
-                        case _:
+                        case _:  # pragma: no cover  (plot_component is real/imag here)
                             raise NotImplementedError(
                                 "Can't plot both imaginary and real in 2D"
                             )
@@ -805,7 +789,7 @@ class Basis(abc.ABC):
                         plt.xlim(*xlim)
                         plt.ylim(*ylim)
 
-            case _:
+            case _:  # pragma: no cover  (FourierBasis supports at most 2D)
                 raise NotImplementedError(
                     "plots for dimensions > 2 need to be implemented"
                 )

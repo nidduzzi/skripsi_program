@@ -1,6 +1,11 @@
 from SpectralSVR import FourierBasis
 from SpectralSVR import to_complex_coeff, to_real_coeff
 import torch
+import pytest
+
+# Legacy end-to-end smoke test; superseded by test_fourier_basis.py which
+# carries the fuzzing/MMS coverage. Opt out of the suite policy here.
+pytestmark = [pytest.mark.no_fuzz, pytest.mark.no_mms]
 
 
 def test_basis():
