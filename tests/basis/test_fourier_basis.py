@@ -94,6 +94,9 @@ def test_mms_transform_recovers_spectrum(coeff):
     u = FourierBasis.inv_transform(coeff, periodic=True)
     recovered = FourierBasis.transform(u, periodic=True)
     assert torch.allclose(recovered, coeff, atol=1e-6)
+    # torch.fft agrees on both legs of the manufacture/recover round trip.
+    assert torch.allclose(u, torch.fft.ifft(coeff, dim=1), atol=1e-6)
+    assert torch.allclose(recovered, torch.fft.fft(u, dim=1), atol=1e-6)
 
 
 @pytest.mark.mms
@@ -103,6 +106,9 @@ def test_mms_transform_recovers_spectrum_2d(coeff):
     u = FourierBasis.inv_transform(coeff, periodic=True)
     recovered = FourierBasis.transform(u, periodic=True)
     assert torch.allclose(recovered, coeff, atol=1e-5)
+    # torch.fft 2D agrees on the manufacture and recovery.
+    assert torch.allclose(u, torch.fft.ifft2(coeff, dim=(1, 2)), atol=1e-5)
+    assert torch.allclose(recovered, torch.fft.fft2(u, dim=(1, 2)), atol=1e-5)
 
 
 @pytest.mark.mms
@@ -111,11 +117,19 @@ def test_mms_transform_recovers_spectrum_2d(coeff):
 def test_mms_grad_is_spectral_derivative(coeff):
     # Known spectrum => known derivative spectrum: c_k * 2*pi*i*k (period 1),
     # with the DC (k=0) mode dropped.
+    n = coeff.shape[1]
     basis = FourierBasis(coeff)
-    k = FourierBasis.wave_number(coeff.shape[1]).T.to(coeff)
+    k = FourierBasis.wave_number(n).T.to(coeff)
     expected = coeff * 2j * torch.pi * k
     expected[:, 0] = 0
-    assert torch.allclose(basis.grad().coeff, expected, atol=1e-6)
+    grad_coeff = basis.grad().coeff
+    assert torch.allclose(grad_coeff, expected, atol=1e-6)
+    # torch.fft-based spectral derivative in value space agrees.
+    k_torch = (torch.fft.fftfreq(n) * n).to(coeff)
+    u = FourierBasis.inv_transform(coeff, periodic=True)
+    dval_torch = torch.fft.ifft(torch.fft.fft(u, dim=1) * 2j * torch.pi * k_torch, dim=1)
+    dval_ours = basis.grad().inv_transform(grad_coeff, periodic=True)
+    assert torch.allclose(dval_ours, dval_torch, atol=1e-6)
 
 
 @pytest.mark.mms
@@ -155,6 +169,8 @@ def test_mms_evaluate_matches_inv_transform_on_grid(coeff):
     ev = basis(grid, device=CPU)
     iv = FourierBasis.inv_transform(coeff, periodic=True)
     assert torch.allclose(ev, iv, atol=1e-6)
+    # both match torch.fft.ifft of the manufactured spectrum on the grid.
+    assert torch.allclose(ev, torch.fft.ifft(coeff, dim=1), atol=1e-6)
 
 
 @pytest.mark.mms

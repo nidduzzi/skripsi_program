@@ -14,16 +14,14 @@ deliberate and visible rather than silent.
 import pytest
 
 
-def pytest_configure(config):
+def pytest_configure(config: pytest.Config):
     config.addinivalue_line(
         "markers", "no_fuzz: test is intentionally not fuzzed with Hypothesis"
     )
     config.addinivalue_line(
         "markers", "mms: test uses the Method of Manufactured Solutions"
     )
-    config.addinivalue_line(
-        "markers", "no_mms: test intentionally does not use MMS"
-    )
+    config.addinivalue_line("markers", "no_mms: test intentionally does not use MMS")
 
 
 def _is_hypothesis_test(item: pytest.Item) -> bool:
