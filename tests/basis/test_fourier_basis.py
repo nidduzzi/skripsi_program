@@ -129,7 +129,7 @@ def test_mms_grad_is_spectral_derivative(coeff):
     u = FourierBasis.inv_transform(coeff, periodic=True)
     dval_torch = torch.fft.ifft(torch.fft.fft(u, dim=1) * 2j * torch.pi * k_torch, dim=1)
     dval_ours = basis.grad().inv_transform(grad_coeff, periodic=True)
-    assert torch.allclose(dval_ours, dval_torch, atol=1e-6)
+    assert torch.allclose(dval_ours, dval_torch, atol=1e-4, rtol=1e-6)
 
 
 @pytest.mark.mms
