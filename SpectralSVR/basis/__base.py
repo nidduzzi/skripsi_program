@@ -5,7 +5,7 @@ from types import ModuleType
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 import logging
-from ..utils import Number, resize_modes, interpolate_tensor
+from ..utils import Number, resize_modes, interpolate_tensor, resolve_device
 # Basis functions
 # - able to set number of modes / basis functions
 # - provides access to the vector of basis function values evaluated at x
@@ -261,12 +261,7 @@ class Basis(abc.ABC):
         Returns:
             tuple[torch.Tensor, torch.Tensor] -- tuple of value and grid respectively of the evaluated functions
         """
-        if device is None:
-            device = (
-                torch.device("cuda:0")
-                if torch.cuda.is_available()
-                else torch.device("cpu")
-            )
+        device = resolve_device(device)
         if evaluation_mode == "auto":
             evaluation_mode = self.prefered_evaluation_mode()
         fin_res = self._get_res_tuple(res)

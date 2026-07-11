@@ -4,8 +4,7 @@ from ..utils import (
     Number,
     SolverSignatureType,
     implicit_adams_solver,
-    # to_complex_coeff,
-    # to_real_coeff,
+    resolve_device,
 )
 from . import Problem
 from typing import Literal, Type
@@ -50,7 +49,7 @@ class Burgers(Problem):
         for dim, m in enumerate(modes):
             assert m > 0, f"number of modes m must be more than 0 at dim {dim}"
 
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        device = resolve_device()
 
         L = space_domain.stop - space_domain.start
         # x = (

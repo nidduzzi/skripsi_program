@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 
 Number = int | float
 
+DeviceInput = torch.device | str | None
+
+
+def resolve_device(device: DeviceInput = None) -> torch.device:
+    """Resolve a device, defaulting to CUDA when available else CPU.
+
+    Centralizes device selection so it can be injected/overridden in one place
+    instead of duplicating ``cuda if available`` checks across the codebase.
+    """
+    if device is None:
+        return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    return torch.device(device)
+
 
 def to_complex_coeff(coeff: torch.Tensor) -> torch.Tensor:
     """

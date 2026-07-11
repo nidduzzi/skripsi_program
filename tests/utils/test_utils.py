@@ -1,4 +1,4 @@
-from SpectralSVR.utils import to_complex_coeff, to_real_coeff
+from SpectralSVR.utils import resolve_device, to_complex_coeff, to_real_coeff
 import torch
 
 
@@ -49,6 +49,17 @@ def test_complex_invertible_odd():
         f"c with shape {c.shape} and c_complex with shape {c_complex.shape} are not equal, check if to_complex_coeff and to_real_coeff are producing correct results, c_real has shape {c_real.shape}"
     )
     print("Test Passed")
+
+
+def test_resolve_device_explicit():
+    assert resolve_device("cpu") == torch.device("cpu")
+    assert resolve_device(torch.device("cpu")) == torch.device("cpu")
+
+
+def test_resolve_device_default_matches_availability():
+    resolved = resolve_device(None)
+    expected = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    assert resolved == expected
 
 
 # TODO: test scale_to_standard
