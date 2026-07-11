@@ -8,7 +8,7 @@ from hypothesis import strategies as st
 
 from SpectralSVR import LSSVR
 
-from _common import SETTINGS, linear_dataset, smooth_dataset
+from _model_data import SETTINGS, linear_dataset, smooth_dataset
 
 
 @pytest.mark.mms

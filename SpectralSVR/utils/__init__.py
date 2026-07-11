@@ -438,6 +438,110 @@ def euler_solver(
     return solution
 
 
+ExpIntNonlinearType = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+# ETDRK4 scheme and the complex contour-integral evaluation of its weight
+# functions follow:
+#   - A.-K. Kassam & L. N. Trefethen, "Fourth-order time-stepping for stiff
+#     PDEs", SIAM J. Sci. Comput. 26(4), 2005.
+#   - S. M. Cox & P. C. Matthews, "Exponential time differencing for stiff
+#     systems", J. Comput. Phys. 176(2), 2002.
+# Reference implementations / benchmarks consulted:
+#   - https://github.com/gurcani/etdrk4cp
+#   - https://github.com/whalenpt/rkstiff
+#   - https://docs.sciml.ai/SciMLBenchmarksOutput/dev/SimpleHandwrittenPDE/burgers_spectral_wpd/
+#   - ETDRK4 review preprint (preprints.org), provided by the project owner.
+
+
+def etdrk4_solver(
+    linear: torch.Tensor,
+    nonlinear: ExpIntNonlinearType,
+    y0: torch.Tensor,
+    t: torch.Tensor,
+    contour_points: int = 32,
+) -> torch.Tensor:
+    """ETDRK4 exponential time-differencing Runge-Kutta integrator.
+
+    Integrates a semilinear system with a *diagonal* linear part::
+
+        dv/dt = L * v + N(t, v)
+
+    where ``L`` is stiff (e.g. ``-nu |k|^2`` for viscous Burgers in Fourier
+    space). The stiff linear part is handled exactly via matrix exponentials;
+    the ETDRK4 weight functions are evaluated with the Kassam-Trefethen
+    complex contour-integral trick to avoid catastrophic float cancellation
+    near ``L = 0``. This is why a generic ``torchdiffeq`` stepper struggles on
+    this stiff problem while ETDRK4 stays stable.
+
+    The scheme is applied elementwise over the mode grid, so it works for any
+    spatial dimensionality: ``linear`` carries the mode grid shape and the
+    solver broadcasts it over the leading sample axis of ``y0``.
+
+    Arguments:
+        linear {torch.Tensor} -- (*modes) eigenvalues of the diagonal linear
+            operator in the transformed (spectral) space; any mode-grid shape
+            (1D, 2D, ...).
+        nonlinear {Callable[[t, v], Nv]} -- nonlinear term in the same spectral
+            space; receives the current time and state ``v`` of shape
+            (samples, *modes) and returns ``N`` of the same shape.
+        y0 {torch.Tensor} -- (samples, *modes) initial state in spectral space.
+        t {torch.Tensor} -- (steps,) uniformly spaced time points.
+
+    Keyword Arguments:
+        contour_points {int} -- number of points on the unit circle used for
+            the contour integral (default: {32}).
+
+    Returns:
+        torch.Tensor -- (steps, samples, *modes) solution in spectral space.
+    """
+    assert t.ndim == 1 and len(t) > 1, "t must be a 1D tensor with >1 points"
+    assert y0.shape[1:] == linear.shape, (
+        f"linear {tuple(linear.shape)} must match y0 mode grid {tuple(y0.shape[1:])}"
+    )
+    device = y0.device
+    h = (t[1] - t[0]).item()
+
+    # Coefficients computed in double precision for accuracy, then cast to y0.
+    lin = linear.to(device=device, dtype=torch.complex128)
+    E = torch.exp(h * lin)
+    E2 = torch.exp(h * lin / 2)
+
+    m = contour_points
+    j = torch.arange(1, m + 1, device=device, dtype=torch.float64)
+    r = torch.exp(1j * torch.pi * (j - 0.5) / m)  # (m,) on the unit circle
+    lr = h * lin.reshape(-1).unsqueeze(-1) + r.unsqueeze(0)  # (prod(modes), m)
+    shape = lin.shape
+
+    def _coef(expr: torch.Tensor) -> torch.Tensor:
+        return (h * expr.mean(dim=-1).real).reshape(shape)
+
+    Q = _coef((torch.exp(lr / 2) - 1) / lr)
+    f1 = _coef((-4 - lr + torch.exp(lr) * (4 - 3 * lr + lr**2)) / lr**3)
+    f2 = _coef((2 + lr + torch.exp(lr) * (-2 + lr)) / lr**3)
+    f3 = _coef((-4 - 3 * lr - lr**2 + torch.exp(lr) * (4 - lr)) / lr**3)
+
+    cdtype = y0.dtype if y0.is_complex() else torch.complex64
+    rdtype = torch.tensor([], dtype=cdtype).real.dtype
+    E, E2 = E.to(cdtype), E2.to(cdtype)
+    Q, f1, f2, f3 = (c.to(rdtype) for c in (Q, f1, f2, f3))
+
+    v = y0.to(cdtype)
+    solution = torch.empty((len(t), *y0.shape), dtype=cdtype, device=device)
+    solution[0] = v
+    for i in range(1, len(t)):
+        ti = t[i - 1]
+        nv = nonlinear(ti, v)
+        a = E2 * v + Q * nv
+        na = nonlinear(ti, a)
+        b = E2 * v + Q * na
+        nb = nonlinear(ti, b)
+        c = E2 * a + Q * (2 * nb - nv)
+        nc = nonlinear(ti, c)
+        v = E * v + nv * f1 + 2 * (na + nb) * f2 + nc * f3
+        solution[i] = v
+    return solution
+
+
 implicit_adams_solver: SolverSignatureType = partial(
     odeint, method="implicit_adams", options={"max_iters": 4}
 )

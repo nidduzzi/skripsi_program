@@ -7,7 +7,7 @@ from hypothesis import strategies as st
 
 from SpectralSVR.model.FNN import FNN
 
-from _common import SETTINGS, constant_dataset, linear_dataset
+from _model_data import SETTINGS, constant_dataset, linear_dataset
 
 
 @pytest.mark.mms

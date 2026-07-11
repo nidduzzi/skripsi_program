@@ -3,6 +3,7 @@ from ..basis import Basis, BasisSubType
 from ..utils import (
     Number,
     SolverSignatureType,
+    etdrk4_solver,
     implicit_adams_solver,
     resolve_device,
 )
@@ -12,8 +13,15 @@ from typing import Literal, Type
 ParamInput = Literal["random"] | Number | torch.Tensor
 
 
-# https://www.math.unl.edu/~alarios2/courses/2017_spring_M934/documents/burgersProject.pdf
-# https://www.math.unl.edu/~alarios2/courses/2017_spring_M934/documents/heat_rk4.m
+# References:
+# - Viscous Burgers background:
+#   https://www.math.unl.edu/~alarios2/courses/2017_spring_M934/documents/burgersProject.pdf
+#   https://www.math.unl.edu/~alarios2/courses/2017_spring_M934/documents/heat_rk4.m
+# - Numerical solver: ETDRK4 (see SpectralSVR.utils.etdrk4_solver for full
+#   references: Kassam & Trefethen 2005; Cox & Matthews 2002; the etdrk4cp,
+#   rkstiff and SciML Burgers-spectral benchmarks).
+# - Exact solutions for testing use the Cole-Hopf transformation: theta solves
+#   the heat equation and u = -2*nu*theta_x/theta solves unforced Burgers.
 class Burgers(Problem):
     """
     Burger's equation problem for one dimension
@@ -60,7 +68,7 @@ class Burgers(Problem):
             f"Make sure that the result of generating t is consistent with dt ({dt}) and t[1]-t[0] ({t[1] - t[0]})"
         )
         periods = (T, L)
-        if u0 == "random" and f == "random":
+        if isinstance(u0, str) and u0 == "random" and isinstance(f, str) and f == "random":
             # use method of manufactured solution
             # generate solution itself since u0 just follows from the generate solution
             # time_mode = modes[0]
@@ -87,14 +95,121 @@ class Burgers(Problem):
                 f_gen = basis(coeff=f_coeff, time_dependent=True, periods=periods)
 
         else:
-            # Only the manufactured-solution path (u0="random", f="random") is
-            # implemented. A numerical IVP solver (e.g. ETDRK4) is future work.
-            raise NotImplementedError(
-                "numerical solver not implemented; use u0='random', f='random'"
+            # Numerical initial-value problem: integrate viscous Burgers with a
+            # stiff-stable ETDRK4 spectral solver to produce simulated data.
+            if not time_dependent_coeff:
+                raise NotImplementedError(
+                    "numerical Burgers only supports time_dependent_coeff=True"
+                )
+            u_gen, f_gen = self._solve_spectral(
+                basis, n, modes, nu, u0, f, periods, t, nt, device, generator
             )
 
         results = (u_gen, f_gen)
         return results
+
+    @staticmethod
+    def _solve_spectral(
+        basis: Type[BasisSubType],
+        n: int,
+        modes: tuple[int, ...],
+        nu: float,
+        u0: "ParamInput | BasisSubType",
+        f: "ParamInput | BasisSubType",
+        periods: tuple[float, ...],
+        t: torch.Tensor,
+        nt: int,
+        device: torch.device,
+        generator: torch.Generator | None,
+    ) -> tuple[BasisSubType, BasisSubType]:
+        """Integrate 1D viscous Burgers with ETDRK4 and package the result.
+
+        Solves ``u_t + 0.5 (u^2)_x = nu u_xx + forcing`` in Fourier space from a
+        random (or given constant) initial condition, on the spatial period
+        ``L = periods[1]`` with ``ns = modes[1]`` spatial modes.
+        """
+        if len(modes) != 2:
+            raise NotImplementedError("numerical Burgers is implemented for 1D space")
+        ns = modes[1]
+        length = periods[1]
+
+        # physical wavenumbers and the diagonal operators (fft ordering).
+        # TODO: wave_number is Fourier-specific; generalize onto Basis later.
+        wn = basis.wave_number(ns).flatten().to(device=device)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+        k = 2 * torch.pi * wn / length
+        linear = (-nu * k**2).to(device=device)
+        deriv = -0.5j * k
+        dealias = (wn.abs() <= ns // 3).to(device=device)
+
+        # initial condition: random smooth field, a constant, or explicit values
+        if isinstance(u0, str) and u0 == "random":
+            v0 = basis.generate_coeff(n, ns, generator=generator).to(device=device)
+        elif isinstance(u0, Number):
+            field = torch.full((n, ns), float(u0), device=device) + 0j
+            v0 = basis.transform(field)
+        elif isinstance(u0, torch.Tensor):
+            field = u0.to(device=device)
+            if field.ndim == 1:
+                field = field.unsqueeze(0).expand(n, ns)
+            assert field.shape == (n, ns), (
+                f"u0 values must be ({n}, {ns}) or ({ns},), got {tuple(field.shape)}"
+            )
+            v0 = basis.transform((field + 0j).clone())
+        else:
+            raise NotImplementedError(
+                "numerical Burgers supports u0='random', a constant, or a value tensor"
+            )
+
+        # constant forcing spectrum (0 by default)
+        if isinstance(f, Number):
+            f_field = torch.full((n, ns), float(f), device=device) + 0j
+            f_hat = basis.transform(f_field)
+        else:
+            raise NotImplementedError("numerical Burgers supports a constant forcing f")
+
+        def nonlinear(ti: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+            u = basis.inv_transform(v).real.to(v.dtype)
+            return deriv * basis.transform(u * u) * dealias + f_hat
+
+        sol = etdrk4_solver(linear, nonlinear, v0, t.to(device=device))  # (nt, n, ns)
+        u_coeff = sol.movedim(0, 1).to(basis.coeff_dtype)  # (n, nt, ns)
+        u_gen = basis(coeff=u_coeff, time_dependent=True, periods=periods)
+
+        f_coeff = f_hat.unsqueeze(1).expand(n, nt, ns).to(basis.coeff_dtype).clone()
+        f_gen = basis(coeff=f_coeff, time_dependent=True, periods=periods)
+        return u_gen, f_gen
+
+    def mms_solution(
+        self,
+        basis: Type[BasisSubType],
+        n: int,
+        modes: tuple[int, ...],
+        nu: float,
+        periods: tuple[float, ...],
+        generator: torch.Generator | None = None,
+    ) -> tuple[BasisSubType, BasisSubType]:
+        """Method of Manufactured Solutions for 1D viscous Burgers.
+
+        Pick an arbitrary band-limited solution ``u`` (a random Fourier field)
+        and let the forcing be ``f = L(u)`` where ``L`` is the Burgers operator
+        :meth:`spectral_residual` (with zero forcing). Then ``u`` exactly solves
+        ``u_t + u u_x - nu u_xx = f`` by construction, so ``spectral_residual``
+        of the returned pair is zero to machine precision.
+
+        ``u`` is band-limited to half the mode budget so the nonlinear term
+        (which doubles the highest frequency) stays resolved and alias-free.
+        Returned as non-time-dependent 2D (time, space) Fourier fields.
+        """
+        if len(modes) != 2:
+            raise NotImplementedError("MMS Burgers is implemented for 1D space")
+        half = tuple(max(1, m // 2) for m in modes)
+        u = basis.generate(n, half, periods=periods, generator=generator).resize_modes(
+            modes, rescale=False
+        )
+        u = basis(coeff=u.coeff, periods=periods)
+        zero_forcing = basis(basis.generate_empty(n, modes), periods=periods)
+        f = self.spectral_residual(u, zero_forcing, nu)
+        return u, f
 
     # rhs spectral formulation adapted from
     # https://math.stackexchange.com/q/3834917 (Gokul, 2020-09-21)
@@ -120,17 +235,28 @@ class Burgers(Problem):
     def spectral_residual(
         self, u: BasisSubType, f: BasisSubType, nu: float
     ) -> BasisSubType:
+        """Spectral residual of ``u_t + u u_x - nu u_xx - f``.
+
+        ``u`` and ``f`` are a non-time-dependent Fourier field whose first mode
+        axis is time and second is space. Everything is expressed through the
+        generic :class:`Basis` interface (``grad`` for exact spectral
+        derivatives, and ``transform``/``inv_transform`` which round-trip), so
+        this works for any spectral basis, not just Fourier. For a band-limited
+        manufactured solution the residual is zero to machine precision.
+        """
         u_t = u.grad(dim=0, ord=1)
-
-        dealias_modes = tuple(int(mode * 1.5) for mode in u.modes)
-        u_dealiased = u.resize_modes(dealias_modes, rescale=False)
-        u_val = u.inv_transform(u_dealiased.coeff)
-        uu_dealiased = u.copy()
-        uu_dealiased.coeff = u.transform(u_val.pow(2).mul(0.5))
-        uu_x = uu_dealiased.resize_modes(u.modes, rescale=False).grad(dim=1)
-
+        u_x = u.grad(dim=1, ord=1)
         u_xx = u.grad(dim=1, ord=2)
-        nu_u_xx = u_xx
+
+        # nonlinear term u * u_x formed in physical space via the basis
+        # transforms (transform . inv_transform is the identity, so no manual
+        # rescaling is needed).
+        u_val = u.inv_transform(u.coeff)
+        u_x_val = u.inv_transform(u_x.coeff)
+        uu_x = u.copy()
+        uu_x.coeff = u.transform(u_val * u_x_val)
+
+        nu_u_xx = u_xx.copy()
         nu_u_xx.coeff = nu_u_xx.coeff * nu
 
         residual = u_t + uu_x - nu_u_xx - f
