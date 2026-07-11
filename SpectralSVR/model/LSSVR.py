@@ -1,5 +1,6 @@
 import typing
 import functools
+import logging
 
 import torch
 import numpy as np
@@ -134,15 +135,15 @@ class LSSVR(MultiRegression):
         self,
         C=1.0,
         kernel: Kernel_Type = "rbf",
-        verbose=False,
         batch_size_func=lambda dims: 2**21 // dims + 7,
         dtype=torch.float32,
         device: torch.device | None = None,
+        logger: logging.Logger | None = None,
         **kernel_params,
     ):
         if device is None:
             device = torch.device("cpu")
-        super().__init__(verbose, dtype, device)
+        super().__init__(dtype, device, logger)
 
         # Hyperparameters
         self.C = C
@@ -191,8 +192,8 @@ class LSSVR(MultiRegression):
     def _batched_K(self, x_i: torch.Tensor, x_j: torch.Tensor):
         batch_size_i = self.batch_size_func(x_i.shape[1])
         batch_size_j = self.batch_size_func(x_j.shape[1])
-        self.print(f"batch_size_i: {batch_size_i}")
-        self.print(f"batch_size_j: {batch_size_j}")
+        self.logger.debug(f"batch_size_i: {batch_size_i}")
+        self.logger.debug(f"batch_size_j: {batch_size_j}")
         num_samples_i = x_i.shape[0]
         num_samples_j = x_j.shape[0]
         if num_samples_i <= batch_size_i and num_samples_j <= batch_size_j:
@@ -220,8 +221,8 @@ class LSSVR(MultiRegression):
         A = torch.empty((X.shape[0] + 1,) * 2, device=self.device, dtype=self.dtype)
         A[1:, 1:] = self._batched_K(X, X)
         # KXX = A[1:, 1:]
-        self.print("Omega:")
-        self.print(A[1:, 1:])
+        self.logger.debug("Omega:")
+        self.logger.debug(A[1:, 1:])
         A[1:, 1:].diagonal().copy_(
             A[1:, 1:].diagonal()
             + torch.ones(
@@ -229,33 +230,33 @@ class LSSVR(MultiRegression):
             )
             / self.C
         )
-        self.print("H:")
-        self.print(A[1:, 1:])
+        self.logger.debug("H:")
+        self.logger.debug(A[1:, 1:])
         A[0, 0] = 0
         A[0, 1:] = 1
         A[1:, 0] = 1
-        self.print("A:")
-        self.print(A)
+        self.logger.debug("A:")
+        self.logger.debug(A)
         shape = np.array(y.shape)
         shape[0] += 1
         B = torch.empty(list(shape), device=self.device, dtype=self.dtype)
         B[0] = 0
         B[1:] = y
-        self.print("B:")
-        self.print(B)
+        self.logger.debug("B:")
+        self.logger.debug(B)
 
         solution: torch.Tensor = torch.linalg.lstsq(A, B).solution.to(
             dtype=self.dtype
         )
-        self.print("S:")
-        self.print(solution)
+        self.logger.debug("S:")
+        self.logger.debug(solution)
 
         b = solution[0, :]
-        self.print("b:")
-        self.print(b)
+        self.logger.debug("b:")
+        self.logger.debug(b)
         alpha = solution[1:, :]
-        self.print("alpha:")
-        self.print(alpha)
+        self.logger.debug("alpha:")
+        self.logger.debug(alpha)
 
         self.alpha = alpha
         self.b = b
@@ -266,15 +267,15 @@ class LSSVR(MultiRegression):
         assert (
             self.alpha is not None and self.sv_x is not None and self.sv_y is not None
         ), "The model doesn't see to be fitted, try running .fit() method first"
-        self.print(f"X:{X_.shape}")
-        self.print(f"sv_x:{self.sv_x.shape}")
+        self.logger.debug(f"X:{X_.shape}")
+        self.logger.debug(f"sv_x:{self.sv_x.shape}")
         KxX = self._batched_K(X_, self.sv_x)
 
-        self.print("Omega:")
-        self.print(KxX)
+        self.logger.debug("Omega:")
+        self.logger.debug(KxX)
         y_pred = KxX @ self.alpha + self.b
-        self.print("y':")
-        self.print(y_pred)
+        self.logger.debug("y':")
+        self.logger.debug(y_pred)
         return y_pred
 
     def get_correlation_image(self):

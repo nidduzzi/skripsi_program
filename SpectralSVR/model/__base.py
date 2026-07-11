@@ -1,5 +1,6 @@
 import abc
 import json
+import logging
 from typing import Callable, overload, Any
 
 import numpy as np
@@ -39,15 +40,17 @@ def load_model(filepath: str = "model") -> dict[str, Any]:
 class MultiRegression(abc.ABC):
     def __init__(
         self,
-        verbose: bool = False,
         dtype: torch.dtype = torch.float32,
         device: torch.device | None = None,
+        logger: logging.Logger | None = None,
     ):
         if device is None:
             device = torch.device("cpu")
         self._device: torch.device = device
-        self.verbose: bool = verbose
         self.dtype: torch.dtype = dtype
+        self.logger: logging.Logger = logger or logging.getLogger(
+            f"{__name__}.{type(self).__name__}"
+        )
 
     @property
     @abc.abstractmethod
@@ -143,10 +146,3 @@ class MultiRegression(abc.ABC):
     @abc.abstractmethod
     def load(cls, filepath: str, only_hyperparams: bool = False) -> Self:
         pass
-
-    def print(
-        self,
-        *values: object,
-    ):
-        if self.verbose:
-            print(*values)

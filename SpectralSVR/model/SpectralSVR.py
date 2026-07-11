@@ -6,7 +6,7 @@ import torch
 from ..basis import Basis, ResType
 from .__base import MultiRegression
 from ..utils import to_complex_coeff, to_real_coeff, get_metrics
-from typing import Literal, Union, Callable
+from typing import Callable
 from torchmetrics.functional.regression import (  # type: ignore[import-not-found]
     mean_squared_error,
 )
@@ -21,7 +21,6 @@ B = TypeVar("B", bound=Basis)
 
 
 class SpectralSVR(Generic[B, R]):
-    verbose: bool
     basis: B
     regressor: R
 
@@ -29,34 +28,22 @@ class SpectralSVR(Generic[B, R]):
         self,
         basis: B,
         regressor: R,
-        verbose: Literal["ALL", "REGRESSOR", "LITE", False, None] = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         """
         __init__
-
 
         Arguments:
             basis {Basis} -- Basis to use for evaluating the computed function
 
         Keyword Arguments:
-            verbose {False | "All" | "REGRESSOR" | "lite"} -- verbosity levels, False for no debug logs, All for all logs, regressor for logs from regressor only, lite all logs except regressor (default: {False})
+            logger {logging.Logger | None} -- logger for debug output; defaults
+                to this module's logger. Control verbosity via logging levels.
+                The regressor keeps its own injected logger. (default: {None})
         """
-        is_regressor_verbose = False
-        self.verbose = False
-        match verbose:
-            case "ALL":
-                self.verbose = True
-                is_regressor_verbose = True
-            case "REGRESSOR":
-                is_regressor_verbose = True
-            case "LITE":
-                self.verbose = True
-            case None:
-                self.verbose = False
-
         self.basis = basis
         self.regressor = regressor
-        self.regressor.verbose = is_regressor_verbose
+        self.logger = logger or logging.getLogger(f"{__name__}.{type(self).__name__}")
 
     def forward(
         self,
@@ -93,7 +80,7 @@ class SpectralSVR(Generic[B, R]):
         if self.basis.coeff_dtype.is_complex:
             coeff = to_complex_coeff(coeff)
 
-        self.print(f"coeff: {coeff.shape}")
+        self.logger.debug(f"coeff: {coeff.shape}")
         return self.basis.evaluate(
             coeff=coeff.reshape((f.shape[0], *self.modes)),
             x=x,
@@ -122,7 +109,7 @@ class SpectralSVR(Generic[B, R]):
         f = f.flatten(1)
         u_coeff = u_coeff.flatten(1)
 
-        self.print(f"modes: {self.modes}")
+        self.logger.debug(f"modes: {self.modes}")
 
         if torch.is_complex(u_coeff):
             # TODO: instance should remember if training output samples are complex
@@ -262,12 +249,3 @@ class SpectralSVR(Generic[B, R]):
             f_coeff_pred = to_complex_coeff(f_coeff_pred)
         f_coeff_pred = f_coeff_pred.unflatten(1, self.modes).to(original_device)
         return f_coeff_pred
-
-    def print(
-        self,
-        *values: object,
-        sep: Union[str, None] = " ",
-        end: Union[str, None] = "\n",
-    ):
-        if self.verbose:
-            print(*values, sep=sep, end=end)

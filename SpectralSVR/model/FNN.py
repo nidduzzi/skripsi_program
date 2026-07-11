@@ -32,13 +32,13 @@ class FNN(MultiRegression):
         activation: type[nn.Module] = nn.Softplus,
         n_hidden: int = 3,  # number of hidden layers
         w_hidden: int = 100,  # width of hidden layers
-        verbose: bool = False,
         dtype: torch.dtype = torch.float32,
         device: torch.device | None = None,
+        logger: logging.Logger | None = None,
     ):
         if device is None:
             device = torch.device("cpu")
-        super().__init__(verbose, dtype, device)
+        super().__init__(dtype, device, logger)
 
         # Hyperparameters
         self.batch_size: int = batch_size
@@ -103,10 +103,10 @@ class FNN(MultiRegression):
             "The model doesn't see to be fitted, try running .fit() method first"
         )
         self.params.eval()
-        self.print(f"X:{X_.shape}")
+        self.logger.debug(f"X:{X_.shape}")
         y_pred = self.params.forward(X_)
-        self.print("y':")
-        self.print(y_pred)
+        self.logger.debug("y':")
+        self.logger.debug(y_pred)
         return y_pred
 
     def dump(self, filepath="model", only_hyperparams=False):
@@ -131,13 +131,6 @@ class FNN(MultiRegression):
         """
 
         raise NotImplementedError()
-
-    def print(
-        self,
-        *values: object,
-    ):
-        if self.verbose:
-            print(*values)
 
 
 NumpyArrayorTensor = np.ndarray | torch.Tensor

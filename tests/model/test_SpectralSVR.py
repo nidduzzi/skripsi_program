@@ -50,9 +50,7 @@ def test_SpectralSVR():
 
     # Train svm
     periods = [1.0]
-    model = SpectralSVR(
-        basis=FourierBasis(periods=periods), regressor=LSSVR(), verbose="ALL"
-    )
+    model = SpectralSVR(basis=FourierBasis(periods=periods), regressor=LSSVR())
     print(f"f_train.shape:, {f_train.shape}")
     print(f"u_coeff_train.shape: {u_coeff_train.shape}")
     model.train(f_train, u_coeff_train)
