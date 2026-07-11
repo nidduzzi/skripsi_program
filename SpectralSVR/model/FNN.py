@@ -1,5 +1,5 @@
 import logging
-from typing_extensions import override
+from typing_extensions import Self, override
 
 import torch
 from torch import nn
@@ -53,16 +53,23 @@ class FNN(MultiRegression):
         self.hidden: nn.Module | None = None
         self.output: nn.Module | None = None
         self.params: nn.Module | None = None
+        self._in_features: int | None = None
+        self._out_features: int | None = None
 
     @property
     @override
     def trained(self) -> bool:
         return self.params is not None
 
-    @override
-    def _optimize_parameters_and_set(self, X: torch.Tensor, y: torch.Tensor):
+    def _build_network(self, in_features: int, out_features: int) -> nn.Module:
+        """Build (and store) the network for the given input/output widths.
+
+        Shared by training and loading so the architecture is defined once.
+        """
+        self._in_features = in_features
+        self._out_features = out_features
         self.input = nn.Sequential(
-            nn.Linear(X.shape[1], self.w_hidden), self.activation()
+            nn.Linear(in_features, self.w_hidden), self.activation()
         )
         self.hidden = nn.Sequential(
             *sum(
@@ -73,11 +80,17 @@ class FNN(MultiRegression):
                 [],
             )
         )
-        self.output = nn.Linear(self.w_hidden, y.shape[1])
+        self.output = nn.Linear(self.w_hidden, out_features)
         self.params = nn.Sequential(self.input, self.hidden, self.output).to(
             device=self.device,
             dtype=self.dtype,
         )
+        return self.params
+
+    @override
+    def _optimize_parameters_and_set(self, X: torch.Tensor, y: torch.Tensor):
+        self._build_network(X.shape[1], y.shape[1])
+        assert self.params is not None
 
         optimizer = torch.optim.Adam(self.params.parameters(), self.lr)
         self.params.train()
@@ -109,28 +122,61 @@ class FNN(MultiRegression):
         self.logger.debug(y_pred)
         return y_pred
 
-    def dump(self, filepath="model", only_hyperparams=False):
-        """This method saves the model in a JSON format.
+    @staticmethod
+    def _resolve_path(filepath: str) -> str:
+        return filepath if filepath.endswith(".pt") else f"{filepath}.pt"
+
+    def dump(self, filepath: str = "model", only_hyperparams: bool = False) -> None:
+        """Save the model with ``torch.save`` (weights are not JSON-friendly).
         - filepath: string, default = 'model'
-            File path to save the model's json.
+            File path to save the model's ``.pt`` file.
         - only_hyperparams: boolean, default = False
             To either save only the model's hyperparameters or not, it
             only affects trained/fitted models.
         """
-        raise NotImplementedError()
+        payload: dict[str, object] = {
+            "type": "FNN",
+            "hyperparameters": {
+                "MAX_EPOCH": self.MAX_EPOCH,
+                "lr": self.lr,
+                "batch_size": self.batch_size,
+                "activation": self.activation,
+                "n_hidden": self.n_hidden,
+                "w_hidden": self.w_hidden,
+                "dtype": self.dtype,
+            },
+        }
+        if (self.params is not None) and (not only_hyperparams):
+            payload["parameters"] = {
+                "in_features": self._in_features,
+                "out_features": self._out_features,
+                "state_dict": self.params.state_dict(),
+            }
+        torch.save(payload, self._resolve_path(filepath))
 
     @classmethod
-    def load(cls, filepath, only_hyperparams=False):
-        """This class method loads a model from a .json file.
+    def load(cls, filepath: str, only_hyperparams: bool = False) -> Self:
+        """Load a model saved by :meth:`dump`.
         - filepath: string
-            The model's .json file path.
+            The model's ``.pt`` file path.
         - only_hyperparams: boolean, default = False
             To either load only the model's hyperparameters or not, it
-            only has effects when the dump of the model as done with the
+            only has effects when the dump of the model was done with the
             model's parameters.
         """
+        payload = torch.load(cls._resolve_path(filepath), weights_only=False)
+        if payload["type"] != "FNN":
+            raise Exception(f"Model type '{payload['type']}' doesn't match 'FNN'")
 
-        raise NotImplementedError()
+        model = cls(**payload["hyperparameters"])
+
+        params = payload.get("parameters")
+        if (params is not None) and (not only_hyperparams):
+            net = model._build_network(params["in_features"], params["out_features"])
+            net.load_state_dict(params["state_dict"])
+            net.eval()
+            net.requires_grad_(False)
+        return model
 
 
 NumpyArrayorTensor = np.ndarray | torch.Tensor

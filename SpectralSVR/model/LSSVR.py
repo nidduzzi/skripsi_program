@@ -45,6 +45,15 @@ def max_k(x_i: torch.Tensor, x_j: torch.Tensor) -> torch.Tensor:
     return torch.max(x_i.unsqueeze(1) - x_j, dim=2).values
 
 
+def default_batch_size(dims: int) -> int:
+    """Default kernel-block batch size along one axis.
+
+    Keeps a ``dims``-wide block near 2**21 elements (plus a small slack) so the
+    batched kernel matrix stays within a reasonable memory budget.
+    """
+    return 2**21 // dims + 7
+
+
 def torch_get_kernel(
     name: Kernel_Type,
     **params,
@@ -84,15 +93,7 @@ class LSSVR(MultiRegression):
     a model is fit for each output.
 
     # Parameters:
-    - min_error: float, default = 0.2
-        Constant that control the error threshold of current support vectors, it may vary
-        in the set (0, 1). The larger max_error is, the higher error is required for
-        current data to stay a support vector.
-    - max_error: float, default = 0.8
-        Constant that control the error threshold of new support vectors, it may vary
-        in the set (0, 1). The larger max_error is, the higher error is required for
-        new data to become a support vector.
-    - C: float, default = 100.0
+    - C: float, default = 1.0
         Constant that control the regularization of the model, it may vary
         in the set (0, +infinity). The larger C is, the more
         regularized the model will be.
@@ -135,7 +136,7 @@ class LSSVR(MultiRegression):
         self,
         C=1.0,
         kernel: Kernel_Type = "rbf",
-        batch_size_func=lambda dims: 2**21 // dims + 7,
+        batch_size_func=default_batch_size,
         dtype=torch.float32,
         device: torch.device | None = None,
         logger: logging.Logger | None = None,
