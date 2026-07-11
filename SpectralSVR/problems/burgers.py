@@ -124,8 +124,12 @@ class Burgers(Problem):
     ) -> tuple[BasisSubType, BasisSubType]:
         """Integrate 1D viscous Burgers with ETDRK4 and package the result.
 
-        Solves ``u_t + 0.5 (u^2)_x = nu u_xx + forcing`` in Fourier space from a
-        random (or given constant) initial condition, on the spatial period
+        Basis-agnostic: the diagonal linear operator ``nu * d2/dx2`` and the
+        spectral derivative for the nonlinear term ``0.5 (u^2)_x`` are built from
+        the basis's ``derivative_eigenvalues``; the transforms use the generic
+        ``transform``/``inv_transform``. Works for any basis whose differentiation
+        is diagonal (Fourier, spherical harmonics). Solves
+        ``u_t + 0.5 (u^2)_x = nu u_xx + forcing`` on spatial period
         ``L = periods[1]`` with ``ns = modes[1]`` spatial modes.
         """
         if len(modes) != 2:
@@ -133,13 +137,17 @@ class Burgers(Problem):
         ns = modes[1]
         length = periods[1]
 
-        # physical wavenumbers and the diagonal operators (fft ordering).
-        # TODO: wave_number is Fourier-specific; generalize onto Basis later.
-        wn = basis.wave_number(ns).flatten().to(device=device)  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
-        k = 2 * torch.pi * wn / length
-        linear = (-nu * k**2).to(device=device)
-        deriv = -0.5j * k
-        dealias = (wn.abs() <= ns // 3).to(device=device)
+        d1 = basis.derivative_eigenvalues(ns, length, ord=1)
+        d2 = basis.derivative_eigenvalues(ns, length, ord=2)
+        if d1 is None or d2 is None:
+            raise NotImplementedError(
+                f"{basis.__name__} differentiation is not diagonal; the ETDRK4 "
+                "solver requires a diagonally-differentiable basis (e.g. Fourier)"
+            )
+        d1 = d1.to(device=device)
+        linear = (nu * d2).to(device=device)  # nu * u_xx eigenvalues
+        mask = basis.dealias_mask(ns)
+        dealias = mask.to(device=device) if mask is not None else 1.0
 
         # initial condition: random smooth field, a constant, or explicit values
         if isinstance(u0, str) and u0 == "random":
@@ -168,8 +176,9 @@ class Burgers(Problem):
             raise NotImplementedError("numerical Burgers supports a constant forcing f")
 
         def nonlinear(ti: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+            # -0.5 (u^2)_x  in spectral space, with optional de-aliasing
             u = basis.inv_transform(v).real.to(v.dtype)
-            return deriv * basis.transform(u * u) * dealias + f_hat
+            return -0.5 * d1 * basis.transform(u * u) * dealias + f_hat
 
         sol = etdrk4_solver(linear, nonlinear, v0, t.to(device=device))  # (nt, n, ns)
         u_coeff = sol.movedim(0, 1).to(basis.coeff_dtype)  # (n, nt, ns)

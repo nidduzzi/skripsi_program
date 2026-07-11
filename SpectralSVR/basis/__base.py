@@ -563,6 +563,33 @@ class Basis(abc.ABC):
             Self -- returns an instance of current basis with antiderivative coefficients
         """
 
+    @staticmethod
+    def derivative_eigenvalues(
+        modes: int, period: float, ord: int = 1
+    ) -> torch.Tensor | None:
+        """Diagonal differentiation multiplier along one axis, or ``None``.
+
+        For a spectral basis whose differentiation operator is *diagonal* in
+        coefficient space (Fourier: ``(2*pi*i*k/period)``; spherical harmonics:
+        per-degree factors), this returns the length-``modes`` vector that
+        ``grad`` multiplies coefficients by (raised to ``ord``). Bases whose
+        differentiation is not diagonal (Chebyshev, wavelet) return ``None``.
+
+        This is what lets diagonal-operator solvers (e.g. the ETDRK4 exponential
+        integrator) be written basis-agnostically: they build the linear
+        operator and spectral derivatives from these eigenvalues via the generic
+        ``transform``/``inv_transform`` interface.
+        """
+        return None
+
+    @staticmethod
+    def dealias_mask(modes: int, fraction: float = 2.0 / 3.0) -> torch.Tensor | None:
+        """Boolean keep-mask for anti-aliasing a length-``modes`` axis, or ``None``.
+
+        Returns ``None`` for bases without a canonical de-aliasing rule.
+        """
+        return None
+
     @abc.abstractmethod
     def copy(self) -> Self:
         """

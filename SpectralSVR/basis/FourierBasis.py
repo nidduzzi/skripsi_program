@@ -194,6 +194,20 @@ class FourierBasis(Basis):
         k = torch.concat([k1, k2], dim=0).unsqueeze(-1).to(target)
         return k
 
+    @staticmethod
+    def derivative_eigenvalues(
+        modes: int, period: float, ord: int = 1
+    ) -> torch.Tensor:
+        # differentiation is diagonal in Fourier space: multiply by (2*pi*i*k/L)
+        k = FourierBasis.wave_number(modes).flatten()
+        return (2 * torch.pi * 1j * k / period) ** ord
+
+    @staticmethod
+    def dealias_mask(modes: int, fraction: float = 2.0 / 3.0) -> torch.Tensor:
+        # Orszag 2/3 rule by default: keep |k| <= fraction * (modes / 2)
+        k = FourierBasis.wave_number(modes).flatten()
+        return k.abs() <= fraction * (modes / 2)
+
     @classmethod
     def generate(
         cls,
@@ -503,70 +517,52 @@ class FourierBasis(Basis):
             f = f.div(torch.tensor(f.shape[1:]).prod())
         return f
 
-    def grad(self, dim: int = 0, ord: int = 1) -> Self:
+    def _diff_multiplier(self, dim: int, ord: int) -> torch.Tensor:
+        """Per-mode Fourier differentiation multiplier ``(2*pi*i*k / period)^ord``.
+
+        Broadcasts over the coefficient tensor along ``dim``. ``grad`` multiplies
+        by it; ``integral`` divides by it.
+        """
+        if self.time_dependent:
+            # disregard the (sample-like) time dimension for spatial derivatives
+            dim = dim - 1
+        eig = self.derivative_eigenvalues(self.modes[dim], self.periods[dim], ord)
+        multiplier_dims = tuple(
+            1 if i != dim else self.modes[i] for i in range(self.ndim)
+        )
+        if self.time_dependent:
+            multiplier_dims = (1, *multiplier_dims)
+        return eig.reshape(multiplier_dims).to(self.coeff)
+
+    def _finite_diff_time(self, op: Literal["grad", "integral"], ord: int) -> Self:
+        """Finite-difference derivative/antiderivative along the time samples."""
         copy = self.copy()
-        if dim == 0 and self.time_dependent:
-            # time dependent use finite differences
-            dt = self.periods[0] / (self.time_size - 1)
-            coeff = copy.coeff
-            for _ in range(ord):
+        dt = self.periods[0] / (self.time_size - 1)
+        coeff = copy.coeff
+        for _ in range(ord):
+            if op == "grad":
                 coeff = torch.gradient(coeff, spacing=dt, dim=1)[0]
-            copy.coeff = coeff
-        else:
-            if self.time_dependent:
-                # disregard time dimension
-                dim = dim - 1
-            k = copy.wave_number(copy.modes[dim])
-            multiplier_dims = tuple(
-                1 if i != dim else copy.modes[i] for i in range(copy.ndim)
-            )
-            # multiplier_dims[dim] = copy.modes[dim]
-            if self.time_dependent:
-                multiplier_dims = (1, *multiplier_dims)
-            multiplier = (
-                2
-                * torch.pi
-                * 1j
-                * k.reshape(multiplier_dims).to(copy.coeff)
-                / self.periods[dim]
-            )
-            multiplier = multiplier.pow(ord)
-            coeff = copy.coeff.mul(multiplier)
-            coeff[:, ..., 0] = torch.tensor(0 + 0j)
-            copy.coeff = coeff
+            else:
+                coeff = coeff.cumsum(1).mul(dt)
+        copy.coeff = coeff
+        return copy
+
+    def grad(self, dim: int = 0, ord: int = 1) -> Self:
+        if dim == 0 and self.time_dependent:
+            return self._finite_diff_time("grad", ord)
+        copy = self.copy()
+        coeff = copy.coeff.mul(self._diff_multiplier(dim, ord))
+        coeff[:, ..., 0] = torch.tensor(0 + 0j)
+        copy.coeff = coeff
         return copy
 
     def integral(self, dim: int = 0, ord: int = 1) -> Self:
-        copy = self.copy()
         if dim == 0 and self.time_dependent:
-            # time dependent use finite differences
-            dt = self.periods[0] / (self.time_size - 1)
-            coeff = copy.coeff
-            for _ in range(ord):
-                coeff = coeff.cumsum(1).mul(dt)
-            copy.coeff = coeff
-        else:
-            if self.time_dependent:
-                # disregard time dimension
-                dim = dim - 1
-            k = copy.wave_number(copy.modes[dim])
-            multiplier_dims = tuple(
-                1 if i != dim else copy.modes[i] for i in range(copy.ndim)
-            )
-            # multiplier_dims[dim] = copy.modes[dim]
-            if self.time_dependent:
-                multiplier_dims = (1, *multiplier_dims)
-            multiplier = (
-                2
-                * torch.pi
-                * 1j
-                * k.reshape(multiplier_dims).to(copy.coeff)
-                / self.periods[dim]
-            )
-            multiplier = multiplier.pow(ord)
-            coeff = copy.coeff.div(multiplier)
-            coeff[:, ..., 0] = torch.tensor(0 + 0j)
-            copy.coeff = coeff
+            return self._finite_diff_time("integral", ord)
+        copy = self.copy()
+        coeff = copy.coeff.div(self._diff_multiplier(dim, ord))
+        coeff[:, ..., 0] = torch.tensor(0 + 0j)
+        copy.coeff = coeff
         return copy
 
     def copy(self) -> Self:
