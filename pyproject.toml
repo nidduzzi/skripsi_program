@@ -60,6 +60,14 @@ packages = ["SpectralSVR"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.pytest.ini_options]
+# Surface warnings as errors so regressions are caught, but allowlist the
+# known matplotlib/numpy copy-keyword deprecation raised during plotting.
+filterwarnings = [
+    "error",
+    "ignore:.*__array__ implementation doesn't accept a copy keyword.*:DeprecationWarning",
+]
+
 [tool.coverage.run]
 source = ["SpectralSVR"]
 

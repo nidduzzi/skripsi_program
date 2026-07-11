@@ -1,7 +1,7 @@
 import torch
 import logging
 import typing
-from typing import Callable
+from typing import Callable, TypedDict, cast, overload
 from torchdiffeq import odeint
 from functools import partial
 from torchmetrics.functional.regression import (
@@ -242,29 +242,61 @@ def scale_to_standard(x: torch.Tensor):
     return x_scaled
 
 
-def get_metrics(preds: torch.Tensor, targets: torch.Tensor):
-    nan_pred_sum = torch.isnan(preds).sum().item()
-    mse = mean_squared_error(preds, targets)
-    rmse = mean_squared_error(preds, targets, squared=False)
-    mae = mean_absolute_error(preds, targets)
+MetricFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def _safe_r2(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    # r2_score is undefined for a single sample.
     if targets.shape[0] > 1:
-        r2 = r2_score(preds, targets)
-    else:
-        r2 = torch.tensor(float("nan"))
-    smape = symmetric_mean_absolute_percentage_error(preds, targets)
-    # TODO: trace problem of rse and rrse values blowing up when a model trained with noise is tested against the clean version of u_coeff_targets
-    rse = relative_squared_error(preds, targets)
-    rrse = relative_squared_error(preds, targets, squared=False)
-    return {
-        "mse": mse.item(),
-        "rmse": rmse.item(),
-        "mae": mae.item(),
-        "r2": r2.item(),
-        "smape": smape.item(),
-        "rse": rse.item(),
-        "rrse": rrse.item(),
-        "pred_nan_sum": nan_pred_sum,
-    }
+        return r2_score(preds, targets)
+    return torch.tensor(float("nan"))
+
+
+# Default metric set; inject a different mapping into get_metrics to override.
+# TODO: trace problem of rse and rrse values blowing up when a model trained
+# with noise is tested against the clean version of u_coeff_targets
+DEFAULT_METRICS: dict[str, MetricFn] = {
+    "mse": mean_squared_error,
+    "rmse": partial(mean_squared_error, squared=False),
+    "mae": mean_absolute_error,
+    "r2": _safe_r2,
+    "smape": symmetric_mean_absolute_percentage_error,
+    "rse": relative_squared_error,
+    "rrse": partial(relative_squared_error, squared=False),
+}
+
+
+class Metrics(TypedDict):
+    """Return type of ``get_metrics`` with the default metric set."""
+
+    mse: float
+    rmse: float
+    mae: float
+    r2: float
+    smape: float
+    rse: float
+    rrse: float
+    pred_nan_sum: int
+
+
+@overload
+def get_metrics(preds: torch.Tensor, targets: torch.Tensor) -> Metrics: ...
+@overload
+def get_metrics(
+    preds: torch.Tensor, targets: torch.Tensor, metrics: dict[str, MetricFn]
+) -> dict[str, float]: ...
+
+
+def get_metrics(
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    metrics: dict[str, MetricFn] | None = None,
+) -> Metrics | dict[str, float]:
+    active = DEFAULT_METRICS if metrics is None else metrics
+    results = {name: fn(preds, targets).item() for name, fn in active.items()}
+    results["pred_nan_sum"] = int(torch.isnan(preds).sum().item())
+    # Default set matches the Metrics keys exactly; a custom set does not.
+    return cast(Metrics, results) if metrics is None else results
 
 
 def resize_modes(x: torch.Tensor, target_modes: int | tuple[int, ...], rescale=True):
