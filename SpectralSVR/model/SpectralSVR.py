@@ -130,6 +130,7 @@ class SpectralSVR(Generic[B, R]):
             u_coeff = to_real_coeff(u_coeff)
         if torch.is_complex(f):
             f = to_real_coeff(f)
+        self.features = f.shape[1]
         self.regressor.fit(f, u_coeff)
         return self
 

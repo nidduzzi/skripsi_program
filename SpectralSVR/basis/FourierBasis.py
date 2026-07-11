@@ -30,11 +30,15 @@ class FourierBasis(Basis):
             periods=periods,
         )
 
-    @Basis.coeff.setter
+    @property
+    def coeff(self) -> torch.Tensor:
+        return self._coeff
+
+    @coeff.setter
     def coeff(self, coeff: torch.Tensor | None):
         if coeff is not None:
             assert coeff.is_complex(), "the coefficients passed in need to be complex"
-        Basis.coeff.__set__(self, coeff)
+        Basis.coeff.fset(self, coeff)  # type: ignore[attr-defined]
 
     def __call__(
         self,

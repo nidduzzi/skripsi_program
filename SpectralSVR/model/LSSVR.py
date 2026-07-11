@@ -226,7 +226,7 @@ class LSSVR(MultiRegression):
             A[1:, 1:].diagonal()
             + torch.ones(
                 (A[1:, 1:].shape[0],), device=self.device, dtype=self.dtype
-            ).to()
+            )
             / self.C
         )
         self.print("H:")
@@ -244,9 +244,9 @@ class LSSVR(MultiRegression):
         self.print("B:")
         self.print(B)
 
-        solution: torch.Tensor = torch.linalg.lstsq(
-            A.to(dtype=torch.float), B.to(dtype=torch.float)
-        ).solution.to(dtype=self.dtype)
+        solution: torch.Tensor = torch.linalg.lstsq(A, B).solution.to(
+            dtype=self.dtype
+        )
         self.print("S:")
         self.print(solution)
 
@@ -344,11 +344,14 @@ class LSSVR(MultiRegression):
         if (model_json.get("parameters") is not None) and (not only_hyperparams):
             params = model_json["parameters"]
             device = lssvr.device
+            dtype = lssvr.dtype
 
-            lssvr.alpha = torch.Tensor(params["alpha"]).double().to(device)
-            lssvr.b = torch.Tensor(params["b"]).double().to(device)
-            lssvr.sv_x = torch.Tensor(params["sv_x"]).double().to(device)
-            lssvr.sv_y = torch.Tensor(params["sv_y"]).double().to(device)
-            lssvr.y_indicies = torch.Tensor(params["y_indicies"]).double().to(device)
+            lssvr.alpha = torch.tensor(params["alpha"], dtype=dtype, device=device)
+            lssvr.b = torch.tensor(params["b"], dtype=dtype, device=device)
+            lssvr.sv_x = torch.tensor(params["sv_x"], dtype=dtype, device=device)
+            lssvr.sv_y = torch.tensor(params["sv_y"], dtype=dtype, device=device)
+            lssvr.y_indicies = torch.tensor(
+                params["y_indicies"], dtype=torch.long, device=device
+            )
 
         return lssvr

@@ -75,7 +75,7 @@ class Basis(abc.ABC):
         self.time_dependent = time_dependent
 
     @property
-    def coeff(self):
+    def coeff(self) -> torch.Tensor:
         return self._coeff
 
     @coeff.setter
@@ -622,7 +622,7 @@ class Basis(abc.ABC):
 
     # TODO: Add plot coefficients function
 
-    def plot(
+    def plot(  # noqa: C901
         self,
         i=0,
         n=1,
