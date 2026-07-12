@@ -48,3 +48,22 @@ def pytest_runtest_setup(item: pytest.Item):
             "@pytest.mark.mms (uses Method of Manufactured Solutions) or "
             "@pytest.mark.no_mms to opt out explicitly."
         )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_torch_globals():
+    """Snapshot and restore torch's global default dtype/device around each test.
+
+    Some optional dependencies mutate torch globals on import (e.g. importing
+    deepxde sets the default device to cuda), which would otherwise leak into
+    every later test and cause device/dtype mismatches.
+    """
+    import torch
+
+    dtype = torch.get_default_dtype()
+    device = torch.get_default_device()
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(dtype)
+        torch.set_default_device(device)
