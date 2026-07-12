@@ -7,9 +7,13 @@ from hypothesis.extra import numpy as hnp
 
 from SpectralSVR.utils import (
     DEFAULT_METRICS,
+    StandardScaler,
+    euler_solver,
     get_metrics,
     resolve_device,
+    scale_to_standard,
     to_complex_coeff,
+    to_mag_angle,
     to_real_coeff,
 )
 
@@ -89,3 +93,126 @@ def test_get_metrics_injected_metric_set():
     assert m["custom"] == 0.0
     assert "mse" not in m
     assert "pred_nan_sum" in m
+
+
+@pytest.mark.no_mms
+# --------------------------------------------------------------------------- #
+# StandardScaler
+# --------------------------------------------------------------------------- #
+@given(rows=st.integers(2, 40), cols=st.integers(1, 8), seed=st.integers(0, 10_000))
+@SETTINGS
+def test_standard_scaler_roundtrip_real(rows, cols, seed):
+    g = torch.Generator().manual_seed(seed)
+    x = torch.randn(rows, cols, generator=g) * 3 + 1.5
+    scaler = StandardScaler().fit(x)
+    assert torch.allclose(scaler.inverse(scaler.transform(x)), x, atol=1e-4)
+
+
+@pytest.mark.no_mms
+@given(rows=st.integers(2, 40), cols=st.integers(1, 8), seed=st.integers(0, 10_000))
+@SETTINGS
+def test_standard_scaler_standardizes(rows, cols, seed):
+    g = torch.Generator().manual_seed(seed)
+    x = torch.randn(rows, cols, generator=g) * 3 + 1.5
+    xt = StandardScaler().fit(x).transform(x)
+    assert torch.allclose(xt.mean(0), torch.zeros(cols), atol=1e-4)
+    assert torch.allclose(xt.std(0, unbiased=False), torch.ones(cols), atol=1e-3)
+
+
+@pytest.mark.no_mms
+@given(rows=st.integers(2, 30), cols=st.integers(1, 6), seed=st.integers(0, 10_000))
+@SETTINGS
+def test_standard_scaler_roundtrip_complex(rows, cols, seed):
+    c = torch.randn(rows, cols, dtype=torch.complex64,
+                    generator=torch.Generator().manual_seed(seed))
+    scaler = StandardScaler().fit(c)
+    assert torch.allclose(scaler.inverse(scaler.transform(c)), c, atol=1e-3)
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_standard_scaler_tuple_and_subset():
+    a = torch.randn(10, 3)
+    b = torch.randn(10, 2, dtype=torch.complex64)
+    scaler = StandardScaler().fit((a, b))
+    ta, tb = scaler.transform((a, b))
+    assert ta.shape == a.shape and tb.shape == b.shape
+    sub = scaler.get_subset_scaler(0)
+    assert torch.allclose(sub.inverse(sub.transform(a)), a, atol=1e-4)
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_standard_scaler_consistency_checks():
+    scaler = StandardScaler().fit(torch.randn(8, 3))
+    with pytest.raises(AssertionError):
+        scaler.transform(torch.randn(8, 4))  # wrong 2nd dim
+    with pytest.raises(AssertionError):
+        scaler.transform(torch.randn(8, 3, dtype=torch.complex64))  # complex mismatch
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_standard_scaler_save_load(tmp_path):
+    x = torch.randn(12, 4)
+    scaler = StandardScaler().fit(x)
+    path = str(tmp_path / "scaler.pt")
+    scaler.save(path)
+    loaded = StandardScaler.load(path)
+    assert torch.allclose(loaded.transform(x), scaler.transform(x), atol=1e-6)
+
+
+@pytest.mark.no_mms
+@given(rows=st.integers(2, 30), cols=st.integers(1, 6), seed=st.integers(0, 10_000))
+@SETTINGS
+def test_scale_to_standard(rows, cols, seed):
+    x = torch.randn(rows, cols, generator=torch.Generator().manual_seed(seed))
+    xt = scale_to_standard(x)
+    assert torch.allclose(xt.mean(0), torch.zeros(cols), atol=1e-4)
+
+
+@pytest.mark.no_mms
+# --------------------------------------------------------------------------- #
+# to_mag_angle
+# --------------------------------------------------------------------------- #
+@given(rows=st.integers(1, 20), cols=st.integers(1, 10), seed=st.integers(0, 10_000))
+@SETTINGS
+def test_to_mag_angle_reconstructs(rows, cols, seed):
+    c = torch.randn(rows, cols, dtype=torch.complex64,
+                    generator=torch.Generator().manual_seed(seed))
+    ma = to_mag_angle(c)
+    assert ma.shape == (rows, 2 * cols)
+    mag, angle = ma[:, ::2], ma[:, 1::2]
+    assert torch.allclose(mag * torch.exp(1j * angle), c, atol=1e-4)
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_to_mag_angle_idempotent_on_real():
+    r = torch.randn(3, 4)
+    assert torch.equal(to_mag_angle(r), r)
+
+
+@pytest.mark.mms
+# --------------------------------------------------------------------------- #
+# euler_solver (MMS: dy/dt = -a y -> y0 exp(-a t))
+# --------------------------------------------------------------------------- #
+@given(a=st.floats(0.2, 3.0), seed=st.integers(0, 10_000))
+@SETTINGS
+def test_euler_solver_linear_decay(a, seed):
+    y0 = torch.randn(2, generator=torch.Generator().manual_seed(seed))
+    t = torch.linspace(0, 1.0, 2000)
+
+    def rhs(ti, y):
+        return -a * y
+
+    sol = euler_solver(rhs, y0, t)
+    exact = y0 * torch.exp(-a * t[-1])
+    assert torch.allclose(sol[-1], exact, atol=5e-2 * y0.abs().max())
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_euler_solver_requires_multiple_points():
+    with pytest.raises(AssertionError):
+        euler_solver(lambda ti, y: y, torch.zeros(2), torch.tensor([0.0]))

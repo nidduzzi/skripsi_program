@@ -229,7 +229,9 @@ class StandardScaler:
 
     @staticmethod
     def load(path: str):
-        scaler: StandardScaler = torch.load(path)
+        # weights_only=False: this pickles a full StandardScaler object, not a
+        # state dict (torch>=2.6 defaults weights_only=True, which rejects it)
+        scaler: StandardScaler = torch.load(path, weights_only=False)
         assert isinstance(scaler, StandardScaler), (
             "Loaded object is not a valid instance of StandardScaler"
         )
@@ -405,6 +407,8 @@ def interpolate_tensor(x: torch.Tensor, index_float: torch.Tensor, dim: int = 1)
 
 # SOLVERS
 
+# Monolithic rhs(t, y) and the signature of a solver that integrates it. Kept
+# for pluggable numerical solvers (e.g. torchdiffeq-backed) on future PDEs.
 RHSFuncType = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 SolverSignatureType = Callable[[RHSFuncType, torch.Tensor, torch.Tensor], torch.Tensor]
 MixedRHSFuncType = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
@@ -440,7 +444,14 @@ def euler_solver(
     return solution
 
 
+# Nonlinear term N(t, v) for a semilinear system dv/dt = L v + N(t, v).
 ExpIntNonlinearType = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+# Signature of an exponential (semilinear) integrator: unlike SolverSignatureType
+# (a single rhs(t, y)), it takes the diagonal linear operator and the nonlinear
+# term separately, since ETDRK4 handles the stiff linear part exactly.
+ExpIntSolverSignatureType = Callable[
+    [torch.Tensor, ExpIntNonlinearType, torch.Tensor, torch.Tensor], torch.Tensor
+]
 
 # ETDRK4 scheme and the complex contour-integral evaluation of its weight
 # functions follow:
@@ -544,6 +555,8 @@ def etdrk4_solver(
     return solution
 
 
+# torchdiffeq-backed ODE solvers matching SolverSignatureType, for pluggable
+# numerical integration of (non-stiff) PDEs reduced to systems of ODEs.
 implicit_adams_solver: SolverSignatureType = partial(
     odeint, method="implicit_adams", options={"max_iters": 4}
 )
