@@ -20,13 +20,13 @@ from _model_data import SETTINGS, linear_dataset, smooth_dataset
     seed=st.integers(0, 10_000),
 )
 def test_lssvr_linear_recovers_linear_map(n, d, o, seed):
-    # Manufacture y = X W + b; a linear-kernel LSSVR recovers it. C=1e4 keeps
-    # the (rank-deficient) Gram system well-conditioned in float32; a larger C
-    # leaves it near-singular and the float32 lstsq becomes unstable.
+    # Manufacture y = X W + b; a linear-kernel LSSVR recovers it. The Gram
+    # system is rank-deficient/ill-conditioned; C=1e4 regularizes it and float64
+    # keeps the lstsq stable on adversarial random draws (float32 drifts).
     X, y = linear_dataset(n, d, o, seed)
-    model = LSSVR(kernel="linear", C=1e4)
-    model.fit(X, y)
-    assert torch.allclose(model.predict(X), y, atol=1e-2)
+    model = LSSVR(kernel="linear", C=1e4, dtype=torch.float64)
+    model.fit(X.double(), y.double())
+    assert torch.allclose(model.predict(X.double()), y.double(), atol=1e-4)
 
 
 @pytest.mark.mms

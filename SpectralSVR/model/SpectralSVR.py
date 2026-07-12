@@ -45,6 +45,15 @@ class SpectralSVR(Generic[B, R]):
         self.regressor = regressor
         self.logger = logger or logging.getLogger(f"{__name__}.{type(self).__name__}")
 
+    @property
+    def output_is_complex(self) -> bool:
+        """Whether output coefficients are complex, dictated by the basis.
+
+        Single source of truth for the output dtype; train/test require the
+        coefficients they are given to match this exactly.
+        """
+        return self.basis.coeff_dtype.is_complex
+
     def forward(
         self,
         f: torch.Tensor,
@@ -68,9 +77,11 @@ class SpectralSVR(Generic[B, R]):
         if len(x.shape) == 1:
             x = x.unsqueeze(-1)
 
-        assert x.shape[1] == len(self.modes), (
-            f"Make sure x is in shape (num_points, dimensions) or (num_points,) for 1D. x has shape {x.shape} and modes is {self.modes}"
-        )
+        if x.shape[1] != len(self.modes):
+            raise ValueError(
+                f"x must have shape (num_points, dimensions) or (num_points,) for "
+                f"1D. x has shape {tuple(x.shape)} and modes is {self.modes}"
+            )
 
         # compute coefficients
         if torch.is_complex(f):
@@ -101,9 +112,12 @@ class SpectralSVR(Generic[B, R]):
             u_coeff {torch.Tensor} -- n output functions coefficients
             u_u_time_dependent {bool} -- whether the output coefficients are time dependent or not (default: {False})
         """
-        assert self.basis.coeff_dtype.is_complex and u_coeff.is_complex(), (
-            f"u_coeff ({u_coeff.dtype}) and self.basis ({self.basis.coeff_dtype}) must both be either real or complex"
-        )
+        if u_coeff.is_complex() != self.output_is_complex:
+            raise ValueError(
+                f"u_coeff dtype ({u_coeff.dtype}) must match the basis coeff_dtype "
+                f"({self.basis.coeff_dtype}): this model was constructed to produce "
+                f"{'complex' if self.output_is_complex else 'real'} output coefficients"
+            )
         self.basis.time_dependent = u_time_dependent
         self.modes = Basis.get_modes(u_coeff, u_time_dependent)
         f = f.flatten(1)
@@ -111,9 +125,9 @@ class SpectralSVR(Generic[B, R]):
 
         self.logger.debug(f"modes: {self.modes}")
 
-        if torch.is_complex(u_coeff):
-            # TODO: instance should remember if training output samples are complex
-            # this info is used to inform the format of the output during evaluation
+        # the regressor works in real space; complex coefficients are stored as
+        # interleaved real/imag pairs
+        if self.output_is_complex:
             u_coeff = to_real_coeff(u_coeff)
         if torch.is_complex(f):
             f = to_real_coeff(f)
@@ -127,17 +141,20 @@ class SpectralSVR(Generic[B, R]):
         u_coeff_targets: torch.Tensor,
         res: ResType | None = None,
     ):
-        assert self.basis.coeff_dtype.is_complex and u_coeff_targets.is_complex(), (
-            f"u_coeff ({u_coeff_targets.dtype}) and self.basis ({self.basis.coeff_dtype}) must both be either real or complex"
-        )
+        if u_coeff_targets.is_complex() != self.output_is_complex:
+            raise ValueError(
+                f"u_coeff_targets dtype ({u_coeff_targets.dtype}) must match the basis "
+                f"coeff_dtype ({self.basis.coeff_dtype}): this model produces "
+                f"{'complex' if self.output_is_complex else 'real'} output coefficients"
+            )
         f = f.flatten(1)
         if torch.is_complex(f):
-            logger.debug("transform f to real")
+            self.logger.debug("transform f to real")
             f = to_real_coeff(f)
         self.features = f.shape[1]
         u_coeff_preds = self.regressor.predict(f)
 
-        if self.basis.coeff_dtype.is_complex:
+        if self.output_is_complex:
             u_coeff_preds = to_complex_coeff(u_coeff_preds)
         u_coeff_preds = u_coeff_preds.unflatten(1, u_coeff_targets.shape[1:])
 
@@ -219,12 +236,12 @@ class SpectralSVR(Generic[B, R]):
         if generator is None:
             generator = torch.Generator().manual_seed(42)
         # TODO: add logic for multidimensional functions (2D+)
-        assert self.regressor.trained, (
-            "Regressor has not been trained, no support vectors"
-        )
-        assert self.features is not None, (
-            "Something went wrong during training, self.features is None"
-        )
+        if not self.regressor.trained:
+            raise RuntimeError("Regressor has not been trained, no support vectors")
+        if self.features is None:
+            raise RuntimeError(
+                "self.features is None; call train (or test) before inverse"
+            )
         f_shape = (u_coeff.shape[0], self.features)
         complex_coeff = u_coeff.is_complex()
         original_device = u_coeff.device
