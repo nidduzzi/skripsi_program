@@ -22,7 +22,7 @@ from .domain import (
     domain_lengths,
     domainInputType_to_tuple,
 )
-from .sampling import SamplingScheme
+from .sampling import SamplingInputType, SamplingScheme, samplings_to_tuple
 from .strategy import DEFAULT_EVALUATION_STRATEGY, EvaluationStrategy
 
 
@@ -30,18 +30,25 @@ from .strategy import DEFAULT_EVALUATION_STRATEGY, EvaluationStrategy
 class SpectralConfig:
     """Coefficient-independent basis configuration (domain, sampling, strategy).
 
-    ``domain`` is stored as given (a single ``(start, stop)`` pair, a per-axis
-    sequence of them, or ``None`` for the unit interval); it is broadcast to a
-    concrete per-axis tuple only on demand, against an explicit mode count.
+    ``domain`` and ``sampling`` are stored as given -- a single value broadcast to
+    every axis, or one per axis -- and resolved to a concrete per-axis tuple only
+    on demand, against an explicit mode count. (A domain may be periodic on one
+    axis and not another, so node placement is per-axis too.)
     """
 
-    sampling: SamplingScheme
+    sampling: SamplingInputType
     domain: DomainInputType = None
     strategy: EvaluationStrategy = DEFAULT_EVALUATION_STRATEGY
 
     def resolve_domain(self, modes: tuple[int, ...]) -> tuple[DomainAxis, ...]:
         """Broadcast the raw domain to one ``(start, stop)`` pair per axis."""
         return domainInputType_to_tuple(self.domain, modes)
+
+    def resolve_sampling(
+        self, ndim: int, default: SamplingScheme
+    ) -> tuple[SamplingScheme, ...]:
+        """Broadcast the sampling input to one scheme per axis."""
+        return samplings_to_tuple(self.sampling, ndim, default)
 
     def lengths(self, modes: tuple[int, ...]) -> tuple[float, ...]:
         """Per-axis length ``stop - start`` for the given mode count."""

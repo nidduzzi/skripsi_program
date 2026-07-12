@@ -8,7 +8,13 @@ from .__base import (
     transformResType_to_tuple,
 )
 from .__base import EvaluationStrategy
-from .sampling import FourierAcceptableScheme, PeriodicUniform, SamplingScheme
+from .sampling import (
+    FourierAcceptableScheme,
+    PeriodicUniform,
+    SamplingInputType,
+    SamplingScheme,
+    samplings_to_tuple,
+)
 from .strategy import DEFAULT_EVALUATION_STRATEGY
 from ._nufft import nufft_available, nufft_evaluate
 from ..utils import to_complex_coeff
@@ -478,7 +484,7 @@ class FourierBasis(Basis):
     def transform(
         f: torch.Tensor,
         res: ResType | None = None,
-        sampling: SamplingScheme | None = None,
+        sampling: SamplingInputType = None,
         strategy: EvaluationStrategy | None = None,
         domain: DomainInputType = None,
         **kwargs,
@@ -500,7 +506,6 @@ class FourierBasis(Basis):
         Returns:
             torch.Tensor -- m complex valued coefficients of f
         """
-        sampling = sampling if sampling is not None else PeriodicUniform()
         strategy = strategy if strategy is not None else DEFAULT_EVALUATION_STRATEGY
         ndims = len(f.shape)
         assert ndims >= 2, (
@@ -509,6 +514,7 @@ class FourierBasis(Basis):
         if not torch.is_complex(f):
             f = f * (1 + 0j)
         domain = domainInputType_to_tuple(domain, f.shape[1:])
+        sampling_axes = samplings_to_tuple(sampling, ndims - 1, PeriodicUniform())
         # Res should by default span the domain, not the unit interval
         res = transformResType_to_tuple(res, tuple(f.shape[1:]), domain)
         # perform 1d transform over every dimension
@@ -519,7 +525,7 @@ class FourierBasis(Basis):
                 dim=cdim,
                 func="forward",
                 res=res[cdim - 1],
-                sampling=sampling,
+                sampling=sampling_axes[cdim - 1],
                 domain=domain[cdim - 1],
                 strategy=strategy,
             )
@@ -530,7 +536,7 @@ class FourierBasis(Basis):
     def inv_transform(
         f: torch.Tensor,
         res: ResType | None = None,
-        sampling: SamplingScheme | None = None,
+        sampling: SamplingInputType = None,
         strategy: EvaluationStrategy | None = None,
         scale: bool = True,
         domain: DomainInputType = None,
@@ -554,7 +560,6 @@ class FourierBasis(Basis):
         Returns:
             torch.Tensor -- m function value vectors
         """
-        sampling = sampling if sampling is not None else PeriodicUniform()
         strategy = strategy if strategy is not None else DEFAULT_EVALUATION_STRATEGY
         ndims = len(f.shape)
         assert ndims >= 2, (
@@ -568,6 +573,7 @@ class FourierBasis(Basis):
         # (modes/res)^ndim whenever res != modes (e.g. plotting, residual grids).
         modes = tuple(f.shape[1:])
         domain = domainInputType_to_tuple(domain, f.shape[1:])
+        sampling_axes = samplings_to_tuple(sampling, ndims - 1, PeriodicUniform())
         # Res should by default span the domain, not the unit interval
         res = transformResType_to_tuple(res, modes, domain)
 
@@ -578,7 +584,7 @@ class FourierBasis(Basis):
                 dim=cdim,
                 func="inverse",
                 res=res[cdim - 1],
-                sampling=sampling,
+                sampling=sampling_axes[cdim - 1],
                 domain=domain[cdim - 1],
                 strategy=strategy,
             )

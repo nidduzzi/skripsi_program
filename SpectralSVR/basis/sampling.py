@@ -13,7 +13,7 @@ incompatible scheme is a type error.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import torch
 
@@ -23,6 +23,7 @@ import torch
 # isinstance (benchmark first).
 
 
+@runtime_checkable
 class SamplingScheme(Protocol):
     """Base protocol: produce ``n`` sample coordinates over ``[start, stop]``.
 
@@ -79,3 +80,34 @@ class ClosedUniform:
 
     def nodes(self, n: int, start: float, stop: float) -> torch.Tensor:
         return torch.linspace(start, stop, n)
+
+
+# A sampling input may be a single scheme (broadcast to every axis) or one scheme
+# per axis. This mirrors the per-axis ``domain`` handling: node placement and FFT
+# eligibility are per-axis (raw_transform evaluates each axis independently), so
+# the sampling scheme is per-axis too. (Boundary conditions -- periodic vs
+# Dirichlet/Neumann -- are a separate, future concept, independent of node
+# placement; Fourier only supports the periodic boundary.)
+type SamplingInputType = (
+    SamplingScheme | tuple[SamplingScheme, ...] | list[SamplingScheme] | None
+)
+
+
+def samplings_to_tuple(
+    sampling: SamplingInputType,
+    ndim: int,
+    default: SamplingScheme,
+) -> tuple[SamplingScheme, ...]:
+    """Normalise a sampling input into one scheme per axis.
+
+    ``None`` uses ``default`` on every axis; a single scheme is broadcast; a
+    per-axis sequence is taken axis-for-axis (a scheme is not a ``Sequence``, so
+    the two are told apart by type).
+    """
+    if sampling is None:
+        return tuple(default for _ in range(ndim))
+    # peel the single scheme off first (runtime-checkable): a per-axis list/tuple
+    # has no scheme attributes, so it won't match, leaving the sequence case.
+    if isinstance(sampling, SamplingScheme):
+        return tuple(sampling for _ in range(ndim))
+    return tuple(scheme for scheme in sampling)

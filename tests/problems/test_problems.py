@@ -27,6 +27,43 @@ from _exact import (
 
 
 # =========================================================================== #
+# Problem.axis_diff -- the finite-difference primitive, validated on its own
+# against analytic derivatives (independent of any transform/residual).
+# =========================================================================== #
+@pytest.mark.mms
+@SETTINGS
+@given(
+    k=st.integers(1, 4),
+    order=st.sampled_from([1, 2]),
+    periodic=st.booleans(),
+)
+def test_axis_diff_matches_analytic(k, order, periodic):
+    N, length = 128, 1.0  # fine enough that the O((k*dx)^2) stencil error < tol
+    kx = 2 * math.pi * k
+    if periodic:  # half-open grid, spacing L/N
+        x = torch.linspace(0, length, N + 1, dtype=torch.float64)[:-1]
+        spacing = length / N
+    else:  # closed grid, spacing L/(N-1)
+        x = torch.linspace(0, length, N, dtype=torch.float64)
+        spacing = length / (N - 1)
+    u = torch.sin(kx * x).view(1, -1)
+    got = Burgers.axis_diff(u, spacing, dim=1, order=order, periodic=periodic)
+    analytic = (kx * torch.cos(kx * x) if order == 1 else -(kx**2) * torch.sin(kx * x))
+    tol = 0.02 * float(analytic.abs().max().clamp(min=1.0))
+    if periodic:  # wrap-around stencil -> exact at the ends too
+        assert torch.allclose(got.view(-1), analytic, atol=tol)
+    else:  # torch.gradient is one-sided at the ends -> compare the interior
+        assert torch.allclose(got.view(-1)[2:-2], analytic[2:-2], atol=tol)
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_axis_diff_rejects_bad_order():
+    with pytest.raises(ValueError, match="order 1 or 2"):
+        Burgers.axis_diff(torch.zeros(1, 4), 1.0, dim=1, order=3, periodic=True)
+
+
+# =========================================================================== #
 # Antiderivative
 # =========================================================================== #
 @pytest.mark.mms
@@ -102,10 +139,10 @@ def test_antiderivative_spectral_residual_matches_analytic(m, seed):
 @SETTINGS
 @given(m=st.integers(1, 3), seed=st.integers(0, 10_000))
 def test_antiderivative_finite_diff_residual_matches_analytic(m, seed):
-    # residual() differentiates with torch.gradient, which is not periodic-aware,
-    # so it carries O(1) error at the wrap boundary; validate the interior.
+    # residual() differences a periodic axis with a wrap-around stencil (values
+    # sit on the basis's half-open grid), so it is accurate over the FULL field.
     problem = Antiderivative()
-    length, modes, b = 1.0, 96, 8  # fine grid; b = boundary margin to exclude
+    length, modes = 1.0, 96  # fine grid
     amp = float(0.5 + torch.rand(1, generator=torch.Generator().manual_seed(seed)))
     x = space_grid(modes, length)
     k = 2 * math.pi * m / length
@@ -113,16 +150,16 @@ def test_antiderivative_finite_diff_residual_matches_analytic(m, seed):
     ut_val = (amp * k * torch.cos(k * x)).view(1, -1)
     u = FourierBasis(FourierBasis.transform(u_val + 0j), domain=(0.0, length))
     ut = FourierBasis(FourierBasis.transform(ut_val + 0j), domain=(0.0, length))
+    zero = FourierBasis(torch.zeros_like(u.coeff), domain=(0.0, length))
 
-    # true pair -> interior residual vanishes. This alone pins the operator: a
-    # wrong derivative term leaves finite_diff(u) - ut != 0 (ut is independent).
-    # The non-solution check lives in the spectral test -- here residual() would
-    # transform the non-periodic finite difference, spreading boundary Gibbs into
-    # the interior and making a value-space reconstruction unreliable.
     tol = 0.05 * float(ut_val.abs().max())  # finite-difference accuracy
+    # true pair (ut analytic) -> residual vanishes; a wrong derivative would not
     r0 = problem.residual(u, ut)
-    r0v = r0.inv_transform(r0.coeff).real[:, b:-b]
+    r0v = r0.inv_transform(r0.coeff).real
     assert torch.allclose(r0v, torch.zeros_like(r0v), atol=tol)
+    # non-solution -> residual equals the analytic derivative (non-trivial output)
+    rn = problem.residual(u, zero)
+    assert torch.allclose(rn.inv_transform(rn.coeff).real, ut_val, atol=tol)
 
 
 @pytest.mark.mms
@@ -151,10 +188,11 @@ def test_burgers_spectral_residual_matches_analytic(nu, seed):
 @SETTINGS
 @given(nu=st.floats(0.01, 0.2), seed=st.integers(0, 10_000))
 def test_burgers_finite_diff_residual_matches_analytic(nu, seed):
-    # finite-diff residual: not periodic-aware, so validate the interior only.
+    # periodic-aware finite-diff residual (both axes periodic here) -> accurate
+    # over the FULL field, not just the interior.
     problem = Burgers()
     nt = ns = 16
-    res, b = 96, 8  # fine grid; boundary margin
+    res = 96  # fine grid
     u_val, f_val = burgers_periodic_manufactured(nt, ns, nu)
     domain = ((0.0, 1.0), (0.0, 1.0))
     u = FourierBasis(FourierBasis.transform(u_val + 0j), domain=domain)
@@ -163,12 +201,13 @@ def test_burgers_finite_diff_residual_matches_analytic(nu, seed):
 
     f_on_grid = f.get_values(res=res).real
     tol = 0.05 * float(f_on_grid.abs().max())  # finite-difference accuracy
+    # exact forcing -> residual vanishes
     r0 = problem.residual(u, f, nu, res=res)
-    r0v = r0.inv_transform(r0.coeff).real[:, b:-b, b:-b]
+    r0v = r0.inv_transform(r0.coeff).real
     assert torch.allclose(r0v, torch.zeros_like(r0v), atol=tol)
-    rn = problem.residual(u, zero, nu, res=res)  # equals the operator applied to u
-    rnv = rn.inv_transform(rn.coeff).real
-    assert torch.allclose(rnv[:, b:-b, b:-b], f_on_grid[:, b:-b, b:-b], atol=tol)
+    # zero forcing -> residual equals the analytic Burgers operator applied to u
+    rn = problem.residual(u, zero, nu, res=res)
+    assert torch.allclose(rn.inv_transform(rn.coeff).real, f_on_grid, atol=tol)
 
 
 @pytest.mark.no_fuzz

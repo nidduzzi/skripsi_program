@@ -1,5 +1,6 @@
 import torch
 from ..basis import Basis, BasisSubType
+from ..basis.sampling import samplings_to_tuple
 from ..utils import (
     Number,
     SolverSignatureType,
@@ -276,19 +277,26 @@ class Burgers(Problem):
         dt = grid[1, 0, 0] - grid[0, 0, 0]
         dx = grid[0, 1, 1] - grid[0, 0, 1]
 
-        # get_values samples on the endpoint-inclusive ClosedUniform grid, so the
-        # differences are non-periodic (one-sided at the ends). A periodic, wrap-
-        # around stencil would need the values on the basis's half-open sampling
-        # grid, and the choice is per-axis (a domain may be periodic on one axis
-        # and Dirichlet/fixed on another). TODO: drive residual sampling +
-        # per-axis differencing from a per-axis boundary spec. See memory
-        # [[basis-domain-config-refactor]].
-        u_t = torch.gradient(u_val, spacing=dt.item(), dim=1, edge_order=2)[0]
-        u_x = torch.gradient(u_val, spacing=dx.item(), dim=2, edge_order=2)[0]
-        u_xx = torch.gradient(u_x, spacing=dx.item(), dim=2, edge_order=2)[0]
-        uu_x = torch.gradient(
-            u_val.pow(2).mul(0.5), spacing=dx.item(), dim=2, edge_order=2
-        )[0]
+        # Periodicity per axis comes from the scheme get_values sampled on -- not
+        # assumed. ``u.ndim`` (and thus the resolved scheme count) is the SPATIAL
+        # rank: a time-dependent field strips its time axis (coeff.ndim - 2), so
+        # the resolved schemes describe spatial axes only (time is a sampled
+        # evolution with no Fourier scheme). A plain field keeps every axis.
+        axis_schemes = samplings_to_tuple(u.sampling, u.ndim, u.default_sampling())
+        if u.time_dependent:
+            # values are (n, time, space): axis_schemes[0] is the SPATIAL axis
+            # (not time); time is the non-periodic evolution axis.
+            time_periodic, space_periodic = False, axis_schemes[0].is_periodic
+        else:
+            # values are (n, axis0, axis1); residual reads axis0 as time, axis1
+            # as space -- both are basis axes with their own scheme.
+            time_periodic = axis_schemes[0].is_periodic
+            space_periodic = axis_schemes[1].is_periodic
+        u_t = self.axis_diff(u_val, dt.item(), dim=1, order=1, periodic=time_periodic)
+        u_xx = self.axis_diff(u_val, dx.item(), dim=2, order=2, periodic=space_periodic)
+        uu_x = self.axis_diff(
+            u_val.pow(2).mul(0.5), dx.item(), dim=2, order=1, periodic=space_periodic
+        )
 
         residual_val = u_t + uu_x - nu * u_xx - f_val
         residual = u.copy()
