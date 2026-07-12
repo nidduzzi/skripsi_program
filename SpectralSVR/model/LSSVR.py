@@ -142,9 +142,7 @@ class LSSVR(MultiRegression):
         logger: logging.Logger | None = None,
         **kernel_params,
     ):
-        if device is None:
-            device = torch.device("cpu")
-        super().__init__(dtype, device, logger)
+        super().__init__(dtype, device, logger)  # base resolves device=None -> cpu
 
         # Hyperparameters
         self.C = C

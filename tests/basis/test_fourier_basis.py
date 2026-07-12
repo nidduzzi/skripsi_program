@@ -126,7 +126,9 @@ def test_mms_grad_is_spectral_derivative(coeff):
     # torch.fft-based spectral derivative in value space agrees.
     k_torch = (torch.fft.fftfreq(n) * n).to(coeff)
     u = FourierBasis.inv_transform(coeff)
-    dval_torch = torch.fft.ifft(torch.fft.fft(u, dim=1) * 2j * torch.pi * k_torch, dim=1)
+    dval_torch = torch.fft.ifft(
+        torch.fft.fft(u, dim=1) * 2j * torch.pi * k_torch, dim=1
+    )
     dval_ours = basis.grad().inv_transform(grad_coeff)
     assert torch.allclose(dval_ours, dval_torch, atol=1e-4, rtol=1e-6)
 
@@ -200,8 +202,10 @@ def test_mms_derivative_of_sine_with_period(amp, freq, period):
     basis = FourierBasis(coeff, periods=period)
     g = basis.grad()
     dval = g.inv_transform(g.coeff, periods=period).real.flatten()
-    analytic = amp * (2 * torch.pi * freq / period) * torch.cos(
-        2 * torch.pi * freq * x / period
+    analytic = (
+        amp
+        * (2 * torch.pi * freq / period)
+        * torch.cos(2 * torch.pi * freq * x / period)
     )
     assert torch.allclose(dval, analytic, atol=1e-2)
 
@@ -258,9 +262,7 @@ def test_mms_cosine_spectrum(freq, amp):
 @SETTINGS
 @given(f=real_signals_1d())
 def test_fuzz_transform_matches_torch_fft(f):
-    assert torch.allclose(
-        FourierBasis.transform(f), torch.fft.fft(f, dim=1), atol=1e-6
-    )
+    assert torch.allclose(FourierBasis.transform(f), torch.fft.fft(f, dim=1), atol=1e-6)
 
 
 @pytest.mark.no_mms
@@ -312,9 +314,7 @@ def test_fuzz_transform_linearity(a, b, f, g):
     rows = min(f.shape[0], g.shape[0])
     f, g = f[:rows, :n], g[:rows, :n]
     lhs = FourierBasis.transform(a * f + b * g)
-    rhs = a * FourierBasis.transform(f) + b * FourierBasis.transform(
-        g
-    )
+    rhs = a * FourierBasis.transform(f) + b * FourierBasis.transform(g)
     assert torch.allclose(lhs, rhs, atol=1e-5)
 
 
@@ -353,8 +353,12 @@ def test_fuzz_fn_columns_are_complex_exponentials(points, modes):
 @SETTINGS
 @given(n=st.integers(1, 5), modes=st.integers(2, 16), seed=st.integers(0, 10_000))
 def test_fuzz_generate_coeff_reproducible(n, modes, seed):
-    a = FourierBasis.generate_coeff(n, modes, generator=torch.Generator().manual_seed(seed))
-    b = FourierBasis.generate_coeff(n, modes, generator=torch.Generator().manual_seed(seed))
+    a = FourierBasis.generate_coeff(
+        n, modes, generator=torch.Generator().manual_seed(seed)
+    )
+    b = FourierBasis.generate_coeff(
+        n, modes, generator=torch.Generator().manual_seed(seed)
+    )
     assert torch.equal(a, b)
     assert a.shape == (n, modes)
 
@@ -552,8 +556,11 @@ def test_evaluate_i_n_selection():
 def test_evaluate_time_dependent():
     coeff = FourierBasis.transform(torch.randn(2, 8, 8) + 0j)
     out = FourierBasis.evaluate(
-        coeff, torch.linspace(0, 1, 10).view(-1, 1),
-        t=torch.linspace(0, 1, 5), time_dependent=True, periods=(1.0, 1.0),
+        coeff,
+        torch.linspace(0, 1, 10).view(-1, 1),
+        t=torch.linspace(0, 1, 5),
+        time_dependent=True,
+        periods=(1.0, 1.0),
     )
     assert out.shape == (2, 5, 10)
 
@@ -564,8 +571,10 @@ def test_evaluate_time_dependent_requires_t():
     coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j)
     with pytest.raises(AssertionError):
         FourierBasis.evaluate(
-            coeff, torch.linspace(0, 1, 5).view(-1, 1),
-            time_dependent=True, periods=(1.0, 1.0),
+            coeff,
+            torch.linspace(0, 1, 5).view(-1, 1),
+            time_dependent=True,
+            periods=(1.0, 1.0),
         )
 
 
@@ -579,7 +588,9 @@ def test_generate_returns_basis():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_generate_zero_value_type():
-    assert torch.count_nonzero(FourierBasis.generate(2, 8, value_type="zero").coeff) == 0
+    assert (
+        torch.count_nonzero(FourierBasis.generate(2, 8, value_type="zero").coeff) == 0
+    )
 
 
 @pytest.mark.no_fuzz
@@ -669,7 +680,10 @@ def test_get_values_and_grid_shapes():
 @pytest.mark.no_mms
 def test_get_values_basis_eval_1d():
     basis = FourierBasis(FourierBasis.transform(torch.randn(1, 16) + 0j))
-    assert basis.get_values(res=16, evaluation_mode="basis", device=CPU).shape == (1, 16)
+    assert basis.get_values(res=16, evaluation_mode="basis", device=CPU).shape == (
+        1,
+        16,
+    )
 
 
 @pytest.mark.no_fuzz
@@ -772,7 +786,9 @@ def _real_1d():
 
 
 def _complex_1d():
-    return FourierBasis(FourierBasis.generate_coeff(1, 32, complex_funcs=True), complex_funcs=True)
+    return FourierBasis(
+        FourierBasis.generate_coeff(1, 32, complex_funcs=True), complex_funcs=True
+    )
 
 
 def _complex_2d():
@@ -892,7 +908,12 @@ def test_separable_evaluate_single_mode_1d(freq, amp, length, npts, seed):
     assert 0 < freq < n // 2
     coeff = torch.zeros(1, n, dtype=torch.complex128)
     coeff[0, freq] = amp * n  # fft index == wavenumber for freq < n/2
-    x = torch.rand(npts, generator=torch.Generator().manual_seed(seed), dtype=torch.float64) * length
+    x = (
+        torch.rand(
+            npts, generator=torch.Generator().manual_seed(seed), dtype=torch.float64
+        )
+        * length
+    )
     got = FourierBasis(coeff, periods=length, strategy=_EXACT)(x, device=CPU)
     exact = amp * torch.exp(2j * torch.pi * freq * x / length)
     assert torch.allclose(got[0], exact, atol=1e-9)
@@ -950,19 +971,24 @@ def test_separable_evaluate_on_grid_matches_torch_ifft2(m, seed):
 @given(
     n=st.integers(2, 24),
     npts=st.integers(1, 100),
-    chunk=st.integers(1, 64),
     seed=st.integers(0, 10_000),
 )
-def test_separable_evaluate_chunking_is_exact(n, npts, chunk, seed):
+def test_separable_evaluate_chunking_is_exact(n, npts, seed):
     # Chunking the separable path over points must not change the result.
     g = torch.Generator().manual_seed(seed)
     coeff = torch.randn(2, n, dtype=torch.complex128, generator=g)
     x = torch.rand(npts, generator=g, dtype=torch.float64)
     whole = FourierBasis(
-        coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=float("inf"))
+        coeff,
+        periods=1.0,
+        strategy=EvaluationStrategy(
+            allow_approximate=False, memory_budget_mb=float("inf")
+        ),
     )(x, device=CPU)
     chunked = FourierBasis(
-        coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=1e-4)
+        coeff,
+        periods=1.0,
+        strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=1e-4),
     )(x, device=CPU)
     assert torch.allclose(whole, chunked, atol=1e-12)
 
@@ -1009,7 +1035,11 @@ def test_strategy_budget_scales_with_dtype(budget_mb, per_point):
 
 @pytest.mark.no_mms
 @SETTINGS
-@given(per_point=st.integers(1, 8192), itemsize=st.sampled_from([8, 16]), dense=st.floats(1.0, 1e18))
+@given(
+    per_point=st.integers(1, 8192),
+    itemsize=st.sampled_from([8, 16]),
+    dense=st.floats(1.0, 1e18),
+)
 def test_strategy_infinite_budget_never_approximates(per_point, itemsize, dense):
     s = EvaluationStrategy(memory_budget_mb=float("inf"))
     assert s.use_approximate(dense, itemsize) is False

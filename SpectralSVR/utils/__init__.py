@@ -335,11 +335,13 @@ def resize_modes(x: torch.Tensor, target_modes: int | tuple[int, ...], rescale=T
             start_range = torch.tensor(
                 range((current_mode - 1) // 2 + 1), dtype=torch.int
             ).to(device=device)
-            # make sure that end range is empty if the coefficient is only size 1
+            # high (negative-frequency) block: the last floor(N/2) modes, i.e.
+            # indices [ceil(N/2), N). Start = N - N//2 = ceil(N/2). The old start
+            # N//2 double-counts the middle mode for odd N (wrong output length).
+            # Empty if the coefficient is size 1.
+            high_start = current_mode - current_mode // 2  # = ceil(N/2)
             end_range = torch.tensor(
-                range(current_mode // 2, current_mode)
-                if current_mode > 1
-                else range(0),
+                range(high_start, current_mode) if current_mode > 1 else range(0),
                 dtype=torch.int,
             ).to(device=device)
             padding_size = target_mode - current_mode

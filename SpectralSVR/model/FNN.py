@@ -36,9 +36,7 @@ class FNN(MultiRegression):
         device: torch.device | None = None,
         logger: logging.Logger | None = None,
     ):
-        if device is None:
-            device = torch.device("cpu")
-        super().__init__(dtype, device, logger)
+        super().__init__(dtype, device, logger)  # base resolves device=None -> cpu
 
         # Hyperparameters
         self.batch_size: int = batch_size

@@ -15,7 +15,7 @@ def torch_json_encoder(obj: Any):  # pyright: ignore[reportExplicitAny]
         if isinstance(obj, torch.Tensor):
             return obj.tolist()
         else:
-            return obj.item()
+            return obj.item()  # pragma: no cover  (non-Tensor torch scalar)
     raise TypeError(f"""Unable to  "jsonify" object of type :', {type(obj)}""")
 
 

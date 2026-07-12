@@ -22,7 +22,7 @@ import torch
 def nufft_available() -> bool:
     try:
         import torchkbnufft  # noqa: F401
-    except ImportError:
+    except ImportError:  # pragma: no cover  (torchkbnufft is a hard dependency)
         return False
     return True
 

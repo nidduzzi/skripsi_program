@@ -23,6 +23,8 @@ B = TypeVar("B", bound=Basis)
 class SpectralSVR(Generic[B, R]):
     basis: B
     regressor: R
+    # number of (real) input features seen at train/test time; None until then
+    features: int | None = None
 
     def __init__(
         self,
@@ -43,6 +45,7 @@ class SpectralSVR(Generic[B, R]):
         """
         self.basis = basis
         self.regressor = regressor
+        self.features = None
         self.logger = logger or logging.getLogger(f"{__name__}.{type(self).__name__}")
 
     @property

@@ -184,7 +184,7 @@ def _component(coeff: torch.Tensor, component: str) -> torch.Tensor:
             return coeff.real
         case "imag":
             return coeff.imag
-        case _:
+        case _:  # pragma: no cover  (component is a validated Literal)
             raise ValueError(f"unknown component {component!r}")
 
 
