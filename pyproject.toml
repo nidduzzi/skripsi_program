@@ -15,6 +15,7 @@ dependencies = [
     "torchmetrics>=1.9.0,<2",
     "torchvision>=0.26.0,<0.27",
     "tqdm>=4.68.4,<5",
+    "torchkbnufft>=1.5.0,<2",
 ]
 authors = [{ name = "nidduzzi", email = "74892632+nidduzzi@users.noreply.github.com" }]
 
@@ -68,6 +69,9 @@ build-backend = "hatchling.build"
 filterwarnings = [
     "error",
     "ignore:.*__array__ implementation doesn't accept a copy keyword.*:DeprecationWarning",
+    # torchkbnufft still uses torch.jit.script internally
+    "ignore:.*torch.jit.script.* is deprecated.*:",
+    "ignore:.*torch.jit.script.*:FutureWarning",
 ]
 
 [tool.coverage.run]
@@ -92,7 +96,7 @@ exclude_also = [
 python_version = "3.12"
 
 [[tool.mypy.overrides]]
-module = ["torchdiffeq.*"]
+module = ["torchdiffeq.*", "torchkbnufft.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

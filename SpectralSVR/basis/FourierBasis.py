@@ -7,8 +7,10 @@ from .__base import (
     transformResType_to_tuple,
 )
 from .sampling import FourierAcceptableScheme, PeriodicUniform, SamplingScheme
+from ._nufft import nufft_available, nufft_evaluate
 from ..utils import to_complex_coeff
 import torch
+import math
 from typing_extensions import Self, Literal, Callable
 from functools import partial
 
@@ -16,6 +18,10 @@ from functools import partial
 ## Fourier basis
 class FourierBasis(Basis):
     coeff_dtype = torch.complex64
+    # Above this many dense basis-matrix elements (points * prod(modes)),
+    # evaluate() switches to the NUFFT path (approximate but far cheaper in
+    # memory/time). Set to None to always use the exact matmul.
+    nufft_threshold: int | None = 2**22
 
     def __init__(
         self,
@@ -123,6 +129,16 @@ class FourierBasis(Basis):
             )
 
         else:
+            npoints = x.shape[0]
+            threshold = cls.nufft_threshold
+            if (
+                threshold is not None
+                and npoints * math.prod(modes) >= threshold
+                and nufft_available()
+            ):
+                # NUFFT already includes the 1/prod(modes) scaling
+                periods_tuple = periodsInputType_to_tuple(periods, modes)
+                return nufft_evaluate(coeff, x, periods_tuple)
             basis = cls.fn(x, modes, periods=periods)
             sum_coeff_x_basis = cls.sum_mul(coeff.flatten(1), basis)
 

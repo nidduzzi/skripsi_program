@@ -2915,6 +2915,7 @@ dependencies = [
     { name = "pandas" },
     { name = "torch" },
     { name = "torchdiffeq" },
+    { name = "torchkbnufft" },
     { name = "torchmetrics" },
     { name = "torchvision" },
     { name = "tqdm" },
@@ -2963,6 +2964,7 @@ requires-dist = [
     { name = "scikit-learn", marker = "extra == 'notebook'", specifier = ">=1.9.0,<2" },
     { name = "torch", specifier = ">=2.11.0,<3", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchdiffeq", specifier = ">=0.2.5,<0.3" },
+    { name = "torchkbnufft", specifier = ">=1.5.0,<2" },
     { name = "torchmetrics", specifier = ">=1.9.0,<2" },
     { name = "torchvision", specifier = ">=0.26.0,<0.27", index = "https://download.pytorch.org/whl/cu128" },
     { name = "tqdm", specifier = ">=4.68.4,<5" },
@@ -3069,6 +3071,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/87/ec/a40aa124660f0ee65e6760cb53df6a82ad91a1a3ef1da5e747f1336644dd/torchdiffeq-0.2.5.tar.gz", hash = "sha256:b50d3760d13fd138dcceac651f4b80396f44fefcebd037a033fecfeaa9cc12e7", size = 31197, upload-time = "2024-11-21T20:20:11.552Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b9/35/537f64f2d0b3cfebaae0f903b4e3a3b239abcc99d0f73cb15b9cee9b8212/torchdiffeq-0.2.5-py3-none-any.whl", hash = "sha256:aa1db4bed13bd04952f28a53cdf4336d1ab60417c1d9698d7a239fec1cf2bcf8", size = 32902, upload-time = "2024-11-21T20:20:09.938Z" },
+]
+
+[[package]]
+name = "torchkbnufft"
+version = "1.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2d/f9/879b1a91035841a082a16762f96e15c14d45e145c964869c03fa1a528b97/torchkbnufft-1.5.2.tar.gz", hash = "sha256:f10aebc6518960aed6ed3c3f16a8f3bb5c9f89e3491c5a275d13297d43037008", size = 7967030, upload-time = "2024-12-04T15:03:03.17Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/a3/1598e9e32db6bd72664ea1b196630f4d3803ed27f83c9ae37665847320d8/torchkbnufft-1.5.2-py3-none-any.whl", hash = "sha256:2d5d08858d631c98db44e19d11d2a5fe2c7ae0da6bcc408f663eddac71f180a7", size = 37406, upload-time = "2024-12-04T15:03:01.359Z" },
 ]
 
 [[package]]
