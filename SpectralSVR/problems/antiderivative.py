@@ -1,5 +1,6 @@
 import torch
 from ..basis import BasisSubType
+from ..basis.sampling import samplings_to_tuple
 from . import Problem
 from typing import Type
 
@@ -69,9 +70,12 @@ class Antiderivative(Problem):
         u_val, grid = u.get_values_and_grid()
         ut_val = ut.get_values()
         dt = grid[1, 0] - grid[0, 0]
-        # non-periodic difference on the ClosedUniform get_values grid (one-sided
-        # ends). See the TODO in Burgers.residual on per-axis periodic sampling.
-        u_grad = torch.gradient(u_val, spacing=dt.item(), dim=1)[0]
+        # differentiation axis wraps iff the scheme get_values sampled on is
+        # periodic (read from the basis, not assumed)
+        periodic = samplings_to_tuple(u.sampling, u.ndim, u.default_sampling())[
+            0
+        ].is_periodic
+        u_grad = self.axis_diff(u_val, dt.item(), dim=1, order=1, periodic=periodic)
         residual_val = u_grad - ut_val
         residual = u.copy()
         residual.coeff = u.transform(residual_val)

@@ -10,7 +10,12 @@ from .domain import (
     domain_lengths,
     domainInputType_to_tuple,
 )
-from .sampling import ClosedUniform, SamplingScheme
+from .sampling import (
+    ClosedUniform,
+    SamplingInputType,
+    SamplingScheme,
+    samplings_to_tuple,
+)
 from .strategy import EvaluationStrategy
 
 if TYPE_CHECKING:
@@ -89,7 +94,7 @@ class Basis(abc.ABC):
         domain: DomainInputType = None,
         complex_funcs: bool = False,
         time_dependent: bool = False,
-        sampling: "SamplingScheme | None" = None,
+        sampling: SamplingInputType = None,
         strategy: "EvaluationStrategy | None" = None,
         **kwargs,
     ) -> None:
@@ -187,8 +192,11 @@ class Basis(abc.ABC):
         return self._config
 
     @property
-    def sampling(self) -> SamplingScheme:
-        """Injected node-placement scheme (delegates to :attr:`config`)."""
+    def sampling(self) -> SamplingInputType:
+        """Injected node-placement scheme(s) (delegates to :attr:`config`).
+
+        A single scheme (broadcast to every axis) or one per axis.
+        """
         return self._config.sampling
 
     @property
@@ -233,12 +241,30 @@ class Basis(abc.ABC):
         """
         ...
 
+    @staticmethod
+    def _grid_from_schemes(
+        res: tuple[slice, ...], schemes: tuple[SamplingScheme, ...]
+    ) -> torch.Tensor:
+        """Rectangular grid whose per-axis nodes come from ``schemes``.
+
+        The grid must sit on the same nodes the values were sampled on, so it is
+        built from each axis's sampling scheme (half-open for periodic, closed for
+        ClosedUniform), not a fixed ``linspace``.
+        """
+        axes = [
+            scheme.nodes(r.step, r.start, r.stop)
+            for scheme, r in zip(schemes, res, strict=True)
+        ]
+        meshgrid = torch.meshgrid(axes, indexing="ij")
+        return torch.stack(meshgrid, dim=-1)
+
     def _get_values_from_inverse_transform(
         self,
         i: int,
         n: int,
         res: tuple[slice, ...],
         device: torch.device,
+        sampling: tuple[SamplingScheme, ...],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if n > 0:
             coeff = self.coeff[i : i + n]
@@ -251,29 +277,32 @@ class Basis(abc.ABC):
             values = self.inv_transform(
                 coeff.flatten(0, 1),
                 res=res_spatial,
-                sampling=ClosedUniform(),
+                sampling=sampling,
                 strategy=self.strategy,
                 domain=self.domain[1:],
             ).unflatten(0, coeff.shape[0:2])
             res_t = res[0]
-            t = self.grid(res_t).to(device=device)
+            # time is an evolution axis (not a Fourier axis): closed/linspace
+            t = ClosedUniform().nodes(res_t.step, res_t.start, res_t.stop).to(device)
             t_start, t_stop = self.domain[0]
             index_float = (
                 (t.flatten() - t_start) / (t_stop - t_start) * (values.shape[1] - 1)
             )
             values = self.interpolate_time_tensor(values, index_float)
+            grid_schemes: tuple[SamplingScheme, ...] = (ClosedUniform(), *sampling)
         else:
             res_spatial = res
             values = self.inv_transform(
                 coeff,
                 res=res_spatial,
-                sampling=ClosedUniform(),
+                sampling=sampling,
                 strategy=self.strategy,
                 domain=self.domain,
             )
+            grid_schemes = sampling
 
         values = values.to(self.coeff)
-        grid = self.grid(res)
+        grid = self._grid_from_schemes(res, grid_schemes)
         return values, grid
 
     def _get_values_from_basis_eval(
@@ -282,6 +311,7 @@ class Basis(abc.ABC):
         n: int,
         res: tuple[slice, ...],
         device: torch.device,
+        sampling: tuple[SamplingScheme, ...],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         res_t = None
         if self.time_dependent:
@@ -291,14 +321,14 @@ class Basis(abc.ABC):
             res_t = res[0]
             res = res[1:]
 
-        grid = self.grid(res)
+        grid = self._grid_from_schemes(res, sampling)
         grid_device = grid.to(device=device)
         if res_t is None:
-            grid_t = None
             grid_t_device = None
             grid_shape = tuple(r.step for r in res)
         else:
-            grid_t = self.grid(res_t)
+            # time is an evolution axis (not a Fourier axis): closed/linspace
+            grid_t = ClosedUniform().nodes(res_t.step, res_t.start, res_t.stop)
             grid_t_device = grid_t.to(device=device)
             grid_shape = tuple(r.step for r in (res_t, *res))
 
@@ -307,7 +337,7 @@ class Basis(abc.ABC):
         ).reshape((-1, *grid_shape))
         if res_t is not None:
             # grid with the time coordinates for complete grid
-            grid = self.grid((res_t, *res))
+            grid = self._grid_from_schemes((res_t, *res), (ClosedUniform(), *sampling))
         return values, grid
 
     def _get_res_tuple(
@@ -357,13 +387,18 @@ class Basis(abc.ABC):
         if evaluation_mode == "auto":
             evaluation_mode = self.prefered_evaluation_mode()
         fin_res = self._get_res_tuple(res)
+        # sample on the basis's own per-axis scheme (resolved like domain), not a
+        # silently-substituted ClosedUniform
+        sampling = samplings_to_tuple(self.sampling, self.ndim, self.default_sampling())
 
         if evaluation_mode == "inverse transform":
             values, grid = self._get_values_from_inverse_transform(
-                i, n, fin_res, device
+                i, n, fin_res, device, sampling
             )
         else:
-            values, grid = self._get_values_from_basis_eval(i, n, fin_res, device)
+            values, grid = self._get_values_from_basis_eval(
+                i, n, fin_res, device, sampling
+            )
 
         return values, grid
 
@@ -511,7 +546,7 @@ class Basis(abc.ABC):
     def transform(
         f: torch.Tensor,
         res: ResType | None = None,
-        sampling: "SamplingScheme | None" = None,
+        sampling: SamplingInputType = None,
         strategy: "EvaluationStrategy | None" = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -536,7 +571,7 @@ class Basis(abc.ABC):
     def inv_transform(
         f: torch.Tensor,
         res: ResType | None = None,
-        sampling: "SamplingScheme | None" = None,
+        sampling: SamplingInputType = None,
         strategy: "EvaluationStrategy | None" = None,
         **kwargs,
     ) -> torch.Tensor:

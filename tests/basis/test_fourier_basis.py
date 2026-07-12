@@ -720,6 +720,27 @@ def test_to_time_dependent_and_back():
     assert not ti.time_dependent
 
 
+@pytest.mark.no_mms
+@SETTINGS
+@given(m=st.integers(2, 8), seed=st.integers(0, 10_000))
+def test_to_time_dependent_preserves_values(m, seed):
+    # Independent anchor (not just flag flips): converting a 2D field to a
+    # time-dependent representation must not change the function it evaluates to.
+    # Ground truth is the original field's own values, so to_time_dependent is
+    # pinned independently; to_time_independent is then pinned by the round trip.
+    g = torch.Generator().manual_seed(seed)
+    u = FourierBasis(
+        FourierBasis.transform(torch.randn(2, m, m, generator=g) + 0j),
+        domain=((0.0, 1.0), (0.0, 1.0)),
+    )
+    uv, _ = u.get_values_and_grid(res=m, device=CPU)
+    td = u.to_time_dependent()  # nt defaults to modes[0] = m
+    tdv, _ = td.get_values_and_grid(res=m, device=CPU)
+    assert torch.allclose(tdv, uv, atol=1e-6)
+    tiv, _ = td.to_time_independent().get_values_and_grid(res=m, device=CPU)
+    assert torch.allclose(tiv, uv, atol=1e-6)
+
+
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_to_time_dependent_default_nt():

@@ -45,6 +45,28 @@ def test_real_complex_real_roundtrip(a):
 @pytest.mark.no_mms
 @SETTINGS
 @given(
+    rows=st.integers(1, 8),
+    half=st.integers(1, 8),
+    seed=st.integers(0, 10_000),
+)
+def test_coeff_interleave_semantics(rows, half, seed):
+    # Independent anchor (not a round trip): pin the actual re/im layout against
+    # separately-built real and imaginary parts. A swapped interleave would pass
+    # the two round-trip tests but fails here.
+    g = torch.Generator().manual_seed(seed)
+    re = torch.randn(rows, half, generator=g)
+    im = torch.randn(rows, half, generator=g)
+    interleaved = torch.empty(rows, 2 * half)
+    interleaved[:, 0::2] = re  # even slots = real, odd = imag
+    interleaved[:, 1::2] = im
+    c = to_complex_coeff(interleaved)
+    assert torch.allclose(c.real, re) and torch.allclose(c.imag, im)
+    assert torch.allclose(to_real_coeff(c), interleaved)
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(
     rows=st.integers(1, 12),
     cols=st.integers(1, 16),
     seed=st.integers(0, 10_000),
