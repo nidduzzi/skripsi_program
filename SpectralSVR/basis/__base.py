@@ -3,6 +3,7 @@ import abc
 from typing_extensions import TYPE_CHECKING, Self, Literal, TypeVar, overload
 import logging
 from ..utils import Number, resize_modes, interpolate_tensor, resolve_device
+from .sampling import SamplingScheme
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -65,6 +66,7 @@ class Basis(abc.ABC):
         periods: PeriodsInputType = 1,
         complex_funcs: bool = False,
         time_dependent: bool = False,
+        sampling: "SamplingScheme | None" = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -74,6 +76,16 @@ class Basis(abc.ABC):
         self.periods = periods
         self._complex_funcs = complex_funcs
         self.time_dependent = time_dependent
+        # injected node-placement strategy; subclass supplies its canonical one
+        self.sampling: SamplingScheme = (
+            sampling if sampling is not None else self.default_sampling()
+        )
+
+    @staticmethod
+    @abc.abstractmethod
+    def default_sampling() -> "SamplingScheme":
+        """The basis's canonical sampling scheme, used when none is injected."""
+        ...
 
     @property
     def coeff(self) -> torch.Tensor:
@@ -606,6 +618,7 @@ class Basis(abc.ABC):
             periods=self.periods,
             complex_funcs=self._complex_funcs,
             time_dependent=self.time_dependent,
+            sampling=self.sampling,
         )
 
     def __sub__(self, other: Self):

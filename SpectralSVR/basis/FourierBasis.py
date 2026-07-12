@@ -6,6 +6,7 @@ from .__base import (
     ResType,
     transformResType_to_tuple,
 )
+from .sampling import FourierAcceptableScheme, PeriodicUniform
 from ..utils import to_complex_coeff
 import torch
 from typing_extensions import Self, Literal, Callable
@@ -22,13 +23,19 @@ class FourierBasis(Basis):
         complex_funcs: bool = False,
         periods: PeriodsInputType = 1,
         time_dependent: bool = False,
+        sampling: FourierAcceptableScheme | None = None,
     ) -> None:
         super().__init__(
             coeff,
             complex_funcs=complex_funcs,
             time_dependent=time_dependent,
             periods=periods,
+            sampling=sampling,
         )
+
+    @staticmethod
+    def default_sampling() -> FourierAcceptableScheme:
+        return PeriodicUniform()
 
     @property
     def coeff(self) -> torch.Tensor:
