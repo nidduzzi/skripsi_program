@@ -22,8 +22,27 @@ from _exact import (
     burgers_periodic_manufactured,
     cole_hopf_params,
     cole_hopf_u,
+    heat_mode_params,
+    heat_mode_u_and_ux,
     space_grid,
 )
+
+
+def _time_dependent_field(vals, t_length, length):
+    """Build a time-dependent FourierBasis from (n, nt, ns) sampled values."""
+    n, nt, ns = vals.shape
+    coeff = FourierBasis.transform((vals + 0j).reshape(n * nt, ns)).reshape(n, nt, ns)
+    return FourierBasis(
+        coeff, time_dependent=True, domain=((0.0, t_length), (0.0, length))
+    )
+
+
+def _residual_interior(problem, u, f, nu, res, ns, b):
+    """residual() values with the time boundary trimmed (torch.gradient is one-
+    sided at the evolution-axis ends), reshaped (n, nt, ns)."""
+    r = problem.residual(u, f, nu, res=res)
+    rv = r.inv_transform(r.coeff.flatten(0, 1)).real.reshape(u.coeff.shape[0], -1, ns)
+    return rv[:, b:-b, :]
 
 
 # =========================================================================== #
@@ -169,7 +188,9 @@ def test_burgers_spectral_residual_matches_analytic(nu, seed):
     # space-time periodic manufactured field; forcing from analytic derivatives
     problem = Burgers()
     nt = ns = 16
-    u_val, f_val = burgers_periodic_manufactured(nt, ns, nu)
+    # both axes are Fourier -> half-open periodic grids
+    x, t = space_grid(ns, 1.0), space_grid(nt, 1.0)
+    u_val, f_val = burgers_periodic_manufactured(x, t, nu)
     domain = ((0.0, 1.0), (0.0, 1.0))
     u = FourierBasis(FourierBasis.transform(u_val + 0j), domain=domain)
     f = FourierBasis(FourierBasis.transform(f_val + 0j), domain=domain)
@@ -193,7 +214,8 @@ def test_burgers_finite_diff_residual_matches_analytic(nu, seed):
     problem = Burgers()
     nt = ns = 16
     res = 96  # fine grid
-    u_val, f_val = burgers_periodic_manufactured(nt, ns, nu)
+    x, t = space_grid(ns, 1.0), space_grid(nt, 1.0)
+    u_val, f_val = burgers_periodic_manufactured(x, t, nu)
     domain = ((0.0, 1.0), (0.0, 1.0))
     u = FourierBasis(FourierBasis.transform(u_val + 0j), domain=domain)
     f = FourierBasis(FourierBasis.transform(f_val + 0j), domain=domain)
@@ -208,6 +230,56 @@ def test_burgers_finite_diff_residual_matches_analytic(nu, seed):
     # zero forcing -> residual equals the analytic Burgers operator applied to u
     rn = problem.residual(u, zero, nu, res=res)
     assert torch.allclose(rn.inv_transform(rn.coeff).real, f_on_grid, atol=tol)
+
+
+@pytest.mark.mms
+@SETTINGS
+@given(
+    n=st.integers(1, 3),
+    n_modes=st.integers(1, 3),
+    nu=st.floats(0.05, 0.2),
+    seed=st.integers(0, 10_000),
+)
+def test_burgers_finite_diff_residual_cole_hopf(n, n_modes, nu, seed):
+    # Cole-Hopf: exact *unforced* Burgers solution (f = 0), independent of the
+    # operator. Time-dependent field -> finite-diff residual, interior in time.
+    problem = Burgers()
+    length, ns, nt, tlen, b = 2 * math.pi, 48, 48, 0.5, 6
+    m, a, bb = cole_hopf_params(n, n_modes, seed, max_m=3)
+    x = space_grid(ns, length)
+    t = torch.linspace(0, tlen, nt, dtype=torch.float64)
+    u_tx = cole_hopf_u(x, t, m, a, bb, nu, length)  # (n, nt, ns)
+    u = _time_dependent_field(u_tx, tlen, length)
+    f = _time_dependent_field(torch.zeros_like(u_tx), tlen, length)
+    r_int = _residual_interior(problem, u, f, nu, ns, ns, b)
+    tol = 0.05 * float(u_tx.abs().max())
+    assert torch.allclose(r_int, torch.zeros_like(r_int), atol=tol)
+
+
+@pytest.mark.mms
+@SETTINGS
+@given(
+    n=st.integers(1, 3),
+    n_modes=st.integers(1, 3),
+    nu=st.floats(0.05, 0.2),
+    seed=st.integers(0, 10_000),
+)
+def test_burgers_finite_diff_residual_heat_mode(n, n_modes, nu, seed):
+    # Heat-mode: u solves the heat equation exactly, so the Burgers forcing that
+    # makes it exact is f = u u_x (independent, analytic). ns is fine because the
+    # nonlinear term (0.5 u^2)_x has double the top wavenumber and is differenced
+    # by a central stencil.
+    problem = Burgers()
+    length, ns, nt, tlen, b = 2 * math.pi, 128, 96, 0.5, 8
+    m, amp, phi = heat_mode_params(n, n_modes, seed, max_m=3)
+    x = space_grid(ns, length)
+    t = torch.linspace(0, tlen, nt, dtype=torch.float64)
+    u_tx, ux_tx = heat_mode_u_and_ux(x, t, m, amp, phi, nu, length)  # (n, nt, ns)
+    u = _time_dependent_field(u_tx, tlen, length)
+    f = _time_dependent_field(u_tx * ux_tx, tlen, length)  # Burgers forcing f = u u_x
+    r_int = _residual_interior(problem, u, f, nu, ns, ns, b)
+    tol = 0.1 * float(u_tx.abs().max())
+    assert torch.allclose(r_int, torch.zeros_like(r_int), atol=tol)
 
 
 @pytest.mark.no_fuzz
@@ -297,7 +369,8 @@ def test_burgers_numerical_matches_cole_hopf_exact(n_modes, seed):
     n = 2
     m, a, b = cole_hopf_params(n, n_modes, seed, max_m=3)
     x = space_grid(ns, length)
-    u0 = cole_hopf_u(x, 0.0, m, a, b, nu, length)  # (n, ns)
+    t0 = torch.zeros(1, dtype=torch.float64)
+    u0 = cole_hopf_u(x, t0, m, a, b, nu, length)[:, 0]  # (n, ns)
 
     problem = Burgers()
     u_gen, _ = problem.generate(
@@ -305,7 +378,7 @@ def test_burgers_numerical_matches_cole_hopf_exact(n_modes, seed):
         space_domain=slice(0, length, ns), time_domain=slice(0, T, nt),
     )
     final = u_gen.inv_transform(u_gen.coeff[:, -1]).real.cpu()
-    exact = cole_hopf_u(x, T, m, a, b, nu, length)
+    exact = cole_hopf_u(x, torch.full((1,), T, dtype=torch.float64), m, a, b, nu, length)[:, 0]
     rel = (final - exact).abs().max() / exact.abs().max()
     assert rel < 5e-2
 
