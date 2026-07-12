@@ -54,8 +54,8 @@ def test_SpectralSVR():
     f_test = scaler.transform(f_test)
 
     # Train svm
-    periods = [1.0]
-    model = SpectralSVR(basis=FourierBasis(periods=periods), regressor=LSSVR())
+    domain = (0.0, 1.0)
+    model = SpectralSVR(basis=FourierBasis(domain=domain), regressor=LSSVR())
     print(f"f_train.shape:, {f_train.shape}")
     print(f"u_coeff_train.shape: {u_coeff_train.shape}")
     model.train(f_train, u_coeff_train)

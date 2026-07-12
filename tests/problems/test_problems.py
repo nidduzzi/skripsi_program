@@ -44,7 +44,7 @@ def test_antiderivative_exact_derivative_of_known_field(n, m, modes, seed):
     x = space_grid(modes, length)
     kx = 2 * math.pi * m / length
     u_val = amp * torch.sin(kx * x).view(1, -1)
-    u = FourierBasis(FourierBasis.transform(u_val + 0j), periods=length)
+    u = FourierBasis(FourierBasis.transform(u_val + 0j), domain=(0.0, length))
 
     du_val = u.grad().inv_transform(u.grad().coeff).real
     analytic = amp * kx * torch.cos(kx * x).view(1, -1)
@@ -82,18 +82,52 @@ def test_antiderivative_rejects_bad_sizes():
     n=st.integers(1, 3),
     space_modes=st.integers(8, 16),
     nu=st.floats(0.01, 0.2),
+    t_start=st.floats(-3.0, 3.0),
+    t_len=st.floats(0.5, 3.0),
+    x_start=st.floats(-3.0, 3.0),
+    x_len=st.floats(0.5, 3.0),
     seed=st.integers(0, 10_000),
 )
-def test_burgers_mms_solution_satisfies_equation(n, space_modes, nu, seed):
+def test_burgers_mms_solution_satisfies_equation(
+    n, space_modes, nu, t_start, t_len, x_start, x_len, seed
+):
+    # Fuzzing the per-axis (start, length) -- starts span 0 -- exercises MMS
+    # exactness on both the canonical [0, L) and shifted/negative-start domains.
+    # grad works off axis lengths, so a shift keeps the residual at machine zero.
     problem = Burgers()
     modes = (space_modes, space_modes)
+    domain = ((t_start, t_start + t_len), (x_start, x_start + x_len))
     u, f = problem.mms_solution(
-        FourierBasis, n, modes, nu=nu, periods=(1.0, 1.0),
+        FourierBasis, n, modes, nu=nu, domain=domain,
         generator=torch.Generator().manual_seed(seed),
     )
     residual = problem.spectral_residual(u, f, nu)
     assert residual.coeff.abs().max() < 1e-4
     assert f.coeff.abs().max() > 0  # non-trivial forcing
+    assert u.domain == domain
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(
+    x_start=st.floats(-3.0, 3.0),
+    x_len=st.floats(0.5, 3.0),
+    t_start=st.floats(-3.0, 3.0),
+    t_len=st.floats(0.5, 3.0),
+    seed=st.integers(0, 10_000),
+)
+def test_burgers_generate_honors_domain_start(x_start, x_len, t_start, t_len, seed):
+    # generate() must thread space_domain.start / time_domain.start into the
+    # output field's domain, not just the lengths.
+    problem = Burgers()
+    u_gen, _ = problem.generate(
+        FourierBasis, 2, (8, 8),
+        space_domain=slice(x_start, x_start + x_len, 64),
+        time_domain=slice(t_start, t_start + t_len, 16),
+        generator=torch.Generator().manual_seed(seed),
+    )
+    assert u_gen.domain[0] == (t_start, t_start + t_len)  # time axis start honored
+    assert u_gen.domain[1] == (x_start, x_start + x_len)  # space axis start honored
 
 
 # =========================================================================== #
@@ -274,8 +308,8 @@ def test_burgers_residual_non_time_dependent(n, m, nu, seed):
     # residual() on a non-time-dependent 2D field exercises the else branch
     g = torch.Generator().manual_seed(seed)
     coeff = FourierBasis.transform(torch.randn(n, m, m, generator=g) + 0j)
-    u = FourierBasis(coeff, periods=(1.0, 1.0))
-    f = FourierBasis(torch.zeros_like(coeff), periods=(1.0, 1.0))
+    u = FourierBasis(coeff, domain=((0.0, 1.0), (0.0, 1.0)))
+    f = FourierBasis(torch.zeros_like(coeff), domain=((0.0, 1.0), (0.0, 1.0)))
     res = Burgers().residual(u, f, nu, res=m)
     assert not res.time_dependent
     assert not torch.isnan(res.coeff).any()

@@ -3,7 +3,7 @@ import torch.utils
 import torch.utils.data
 import torch.utils.data.dataset
 import torch
-from ..basis import Basis, ResType
+from ..basis import Basis, DomainInputType, ResType, SpectralConfig
 from .__base import MultiRegression
 from ..utils import to_complex_coeff, to_real_coeff, get_metrics
 from typing import Callable
@@ -21,8 +21,17 @@ B = TypeVar("B", bound=Basis)
 
 
 class SpectralSVR(Generic[B, R]):
-    basis: B
+    # The basis is decomposed at construction into its two useful halves: the
+    # basis *class* (holding the stateless transform/evaluate statics and coeff
+    # dtype) and the config (domain/sampling/strategy spec). Named ``basis_type``,
+    # not "kernel", to avoid confusion with the SVR/basis-function kernels.
+    # Time-dependence is model-owned state, learned at train time -- the model no
+    # longer reaches into a shared basis instance to flip it.
+    basis_type: type[B]
+    config: SpectralConfig
     regressor: R
+    time_dependent: bool
+    complex_funcs: bool
     # number of (real) input features seen at train/test time; None until then
     features: int | None = None
 
@@ -36,14 +45,19 @@ class SpectralSVR(Generic[B, R]):
         __init__
 
         Arguments:
-            basis {Basis} -- Basis to use for evaluating the computed function
+            basis {Basis} -- Basis whose class and config drive the model. The
+                instance is decomposed at construction; only its class
+                (``basis_type``) and config (domain/sampling/strategy) are retained.
 
         Keyword Arguments:
             logger {logging.Logger | None} -- logger for debug output; defaults
                 to this module's logger. Control verbosity via logging levels.
                 The regressor keeps its own injected logger. (default: {None})
         """
-        self.basis = basis
+        self.basis_type = type(basis)
+        self.config = basis.config
+        self.time_dependent = basis.time_dependent
+        self.complex_funcs = basis.complex_funcs
         self.regressor = regressor
         self.features = None
         self.logger = logger or logging.getLogger(f"{__name__}.{type(self).__name__}")
@@ -55,14 +69,13 @@ class SpectralSVR(Generic[B, R]):
         Single source of truth for the output dtype; train/test require the
         coefficients they are given to match this exactly.
         """
-        return self.basis.coeff_dtype.is_complex
+        return self.basis_type.coeff_dtype.is_complex
 
     def forward(
         self,
         f: torch.Tensor,
         x: torch.Tensor,
-        periods: tuple[float, ...]
-        | None = None,  # TODO: use basis args like period etc to make it easier to change for different basis
+        domain: DomainInputType = None,
     ) -> torch.Tensor:
         """
         forward
@@ -72,6 +85,10 @@ class SpectralSVR(Generic[B, R]):
         Arguments:
             f {torch.Tensor} -- m discretized input functions to transform using the approximated operator
             x {torch.Tensor} -- m evaluation points for the transformed input functions
+
+        Keyword Arguments:
+            domain {DomainInputType} -- per-axis (start, stop) interval override
+                for this call; defaults to the model's config domain (default: {None})
 
         Returns:
             torch.Tensor -- _description_
@@ -90,17 +107,17 @@ class SpectralSVR(Generic[B, R]):
         if torch.is_complex(f):
             f = to_real_coeff(f)
         coeff = self.regressor.predict(f)
-        # convert to complex if basis needs complex values so that the reshaping is correct
-        if self.basis.coeff_dtype.is_complex:
+        # convert to complex if the basis needs complex values so that the reshaping is correct
+        if self.output_is_complex:
             coeff = to_complex_coeff(coeff)
 
         self.logger.debug(f"coeff: {coeff.shape}")
-        return self.basis.evaluate(
+        return self.basis_type.evaluate(
             coeff=coeff.reshape((f.shape[0], *self.modes)),
             x=x,
-            periods=periods,
-            time_dependent=self.basis.time_dependent,
-            strategy=self.basis.strategy,
+            domain=domain if domain is not None else self.config.domain,
+            time_dependent=self.time_dependent,
+            strategy=self.config.strategy,
         )
 
     def train(
@@ -119,10 +136,10 @@ class SpectralSVR(Generic[B, R]):
         if u_coeff.is_complex() != self.output_is_complex:
             raise ValueError(
                 f"u_coeff dtype ({u_coeff.dtype}) must match the basis coeff_dtype "
-                f"({self.basis.coeff_dtype}): this model was constructed to produce "
+                f"({self.basis_type.coeff_dtype}): this model was constructed to produce "
                 f"{'complex' if self.output_is_complex else 'real'} output coefficients"
             )
-        self.basis.time_dependent = u_time_dependent
+        self.time_dependent = u_time_dependent
         self.modes = Basis.get_modes(u_coeff, u_time_dependent)
         f = f.flatten(1)
         u_coeff = u_coeff.flatten(1)
@@ -148,7 +165,7 @@ class SpectralSVR(Generic[B, R]):
         if u_coeff_targets.is_complex() != self.output_is_complex:
             raise ValueError(
                 f"u_coeff_targets dtype ({u_coeff_targets.dtype}) must match the basis "
-                f"coeff_dtype ({self.basis.coeff_dtype}): this model produces "
+                f"coeff_dtype ({self.basis_type.coeff_dtype}): this model produces "
                 f"{'complex' if self.output_is_complex else 'real'} output coefficients"
             )
         f = f.flatten(1)
@@ -162,25 +179,25 @@ class SpectralSVR(Generic[B, R]):
             u_coeff_preds = to_complex_coeff(u_coeff_preds)
         u_coeff_preds = u_coeff_preds.unflatten(1, u_coeff_targets.shape[1:])
 
-        if self.basis.time_dependent:
+        if self.time_dependent:
             time_shape = u_coeff_targets.shape[1]
 
             u_preds = (
-                self.basis.inv_transform(u_coeff_preds.flatten(0, 1), res=res)
+                self.basis_type.inv_transform(u_coeff_preds.flatten(0, 1), res=res)
                 .unflatten(0, (-1, time_shape))
                 .flatten(1)
             )
             u_targets = (
-                self.basis.inv_transform(u_coeff_targets.flatten(0, 1), res=res)
+                self.basis_type.inv_transform(u_coeff_targets.flatten(0, 1), res=res)
                 .unflatten(0, (-1, time_shape))
                 .flatten(1)
             )
 
         else:
-            u_preds = self.basis.inv_transform(u_coeff_preds, res=res).flatten(1)
-            u_targets = self.basis.inv_transform(u_coeff_targets, res=res).flatten(1)
+            u_preds = self.basis_type.inv_transform(u_coeff_preds, res=res).flatten(1)
+            u_targets = self.basis_type.inv_transform(u_coeff_targets, res=res).flatten(1)
 
-        if self.basis._complex_funcs:
+        if self.complex_funcs:
             u_preds = to_real_coeff(u_preds)
             u_targets = to_real_coeff(u_targets)
         else:
@@ -220,9 +237,13 @@ class SpectralSVR(Generic[B, R]):
             gain=gain,
             **optimizer_params,
         )
-        f = self.basis.copy()
-        f.coeff = f_coeff_pred
-        f_pred = f(points)
+        field = self.basis_type.from_config(
+            f_coeff_pred,
+            self.config,
+            time_dependent=self.time_dependent,
+            complex_funcs=self.complex_funcs,
+        )
+        f_pred = field(points)
 
         return f_pred
 

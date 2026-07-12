@@ -2,9 +2,16 @@ import torch
 import abc
 from typing_extensions import TYPE_CHECKING, Self, Literal, TypeVar, overload
 import logging
-from ..utils import Number, resize_modes, interpolate_tensor, resolve_device
+from ..utils import resize_modes, interpolate_tensor, resolve_device
+from .config import SpectralConfig
+from .domain import (
+    DomainAxis,
+    DomainInputType,
+    domain_lengths,
+    domainInputType_to_tuple,
+)
 from .sampling import ClosedUniform, SamplingScheme
-from .strategy import DEFAULT_EVALUATION_STRATEGY, EvaluationStrategy
+from .strategy import EvaluationStrategy
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -17,32 +24,30 @@ logger = logging.getLogger(__name__)
 ResType = int | slice | tuple[slice, ...]
 EvaluationModeType = Literal["inverse transform", "basis"]
 AutoEvaluationModeType = Literal["auto"] | EvaluationModeType
-PeriodsInputType = Number | list[Number] | tuple[Number, ...] | None
 
-
-def periodsInputType_to_tuple(
-    periods: PeriodsInputType, modes: tuple[int, ...]
-) -> tuple[float, ...]:
-    if isinstance(periods, list) or isinstance(periods, tuple):
-        periods = tuple(float(period) for period in periods)
-    else:
-        if periods is None:
-            periods = 1.0
-        periods = float(periods)
-        periods = tuple(periods for _ in range(len(modes)))
-    return periods
+# Domain types/helpers live in .domain; SpectralConfig in .config. Re-exported
+# here so existing ``from .__base import DomainInputType`` call sites keep working.
+__all__ = [
+    "Basis",
+    "DomainAxis",
+    "DomainInputType",
+    "SpectralConfig",
+    "domainInputType_to_tuple",
+    "domain_lengths",
+]
 
 
 def transformResType_to_tuple(
-    res: ResType | None, modes: tuple[int, ...], periods: tuple[float, ...]
+    res: ResType | None, modes: tuple[int, ...], domain: tuple[DomainAxis, ...]
 ) -> tuple[slice, ...]:
-    assert len(periods) == len(modes), "periods should have the same dimension as modes"
+    assert len(domain) == len(modes), "domain should have the same dimension as modes"
     if res is None:
         _res = tuple(
-            slice(0, period, mode) for period, mode in zip(periods, modes, strict=True)
+            slice(start, stop, mode)
+            for (start, stop), mode in zip(domain, modes, strict=True)
         )
     elif isinstance(res, int):
-        _res = tuple(slice(0, period, res) for period in periods)
+        _res = tuple(slice(start, stop, res) for start, stop in domain)
     elif isinstance(res, slice):
         _res = tuple(res for mode in modes)
     else:
@@ -54,8 +59,25 @@ def transformResType_to_tuple(
 
 
 class Basis(abc.ABC):
-    """
-    Basis function for ndim dimensions
+    """Spectral basis over ``ndim`` dimensions.
+
+    A ``Basis`` plays two distinct roles, deliberately kept separable:
+
+    * **Spectral transform** (stateless) -- every ``@classmethod`` /
+      ``@staticmethod`` here (``transform``, ``inv_transform``, ``evaluate``,
+      ``fn``, ``derivative_eigenvalues``, ``generate*``, ``wave_number``, ...).
+      These depend only on their arguments, not on instance state, so callers
+      that hold no coefficients (e.g. a model's ``basis_type``) use the class
+      directly. This is the basis *transform* interface -- never called a
+      "kernel", to avoid confusion with the SVR/basis-function kernels.
+    * **Spectral field** (an instance) -- ``coeff`` plus a :class:`SpectralConfig`
+      spec, with the coefficient-dependent operations bound to them (``grad``,
+      ``integral``, ``get_values``, ``__call__``, ``resize_modes``, ...). See the
+      :data:`SpectralField` alias, which names this role in signatures. Build one
+      from a spec with :meth:`from_config`.
+
+    Plotting (``plot``, ``plot_coefficients``) is a consumer of the field role and
+    lives in :mod:`._plot`; the methods here just delegate to it.
     """
 
     _coeff: torch.Tensor
@@ -64,7 +86,7 @@ class Basis(abc.ABC):
     def __init__(
         self,
         coeff: torch.Tensor | None = None,
-        periods: PeriodsInputType = 1,
+        domain: DomainInputType = None,
         complex_funcs: bool = False,
         time_dependent: bool = False,
         sampling: "SamplingScheme | None" = None,
@@ -75,16 +97,39 @@ class Basis(abc.ABC):
         if not hasattr(self, "coeff_dtype"):
             raise NotImplementedError("Subclasses must define 'coeff_dtype'")
         self.coeff = coeff
-        self.periods = periods
         self._complex_funcs = complex_funcs
         self.time_dependent = time_dependent
-        # injected node-placement strategy; subclass supplies its canonical one
-        self.sampling: SamplingScheme = (
-            sampling if sampling is not None else self.default_sampling()
+        # Coefficient-independent spec (domain geometry + injected node-placement
+        # scheme + evaluation/transform tuning). Single source of truth for these;
+        # ``domain``/``lengths``/``sampling``/``strategy`` all read through it.
+        self._config = SpectralConfig(
+            sampling=sampling if sampling is not None else self.default_sampling(),
+            domain=domain,
+            **({} if strategy is None else {"strategy": strategy}),
         )
-        # injected evaluation/transform tuning (memory budget, approx allowed)
-        self.strategy: EvaluationStrategy = (
-            strategy if strategy is not None else DEFAULT_EVALUATION_STRATEGY
+
+    @classmethod
+    def from_config(
+        cls,
+        coeff: torch.Tensor | None,
+        config: SpectralConfig,
+        *,
+        time_dependent: bool = False,
+        complex_funcs: bool = False,
+    ) -> Self:
+        """Build a coefficient field from a :class:`SpectralConfig` spec.
+
+        The spec (domain/sampling/strategy) supplies the geometry; ``coeff`` and
+        the two flags supply the coefficient-dependent state. This is the bridge
+        from the config role back to a concrete field.
+        """
+        return cls(
+            coeff=coeff,
+            domain=config.domain,
+            sampling=config.sampling,
+            strategy=config.strategy,
+            time_dependent=time_dependent,
+            complex_funcs=complex_funcs,
         )
 
     @staticmethod
@@ -137,20 +182,43 @@ class Basis(abc.ABC):
         return self.coeff.shape[1]
 
     @property
-    def periods(self) -> tuple[float, ...]:
-        return periodsInputType_to_tuple(
-            self._periods,
-            self.coeff.shape[1:],
-        )
+    def config(self) -> SpectralConfig:
+        """The coefficient-independent spec (domain, sampling, strategy)."""
+        return self._config
 
-    @periods.setter
-    def periods(
-        self,
-        periods: PeriodsInputType,
-    ):
-        if len(self.coeff.shape) > 0:
-            periods = periodsInputType_to_tuple(periods, self.coeff.shape[1:])
-        self._periods = periods
+    @property
+    def sampling(self) -> SamplingScheme:
+        """Injected node-placement scheme (delegates to :attr:`config`)."""
+        return self._config.sampling
+
+    @property
+    def strategy(self) -> EvaluationStrategy:
+        """Injected evaluation/transform tuning (delegates to :attr:`config`)."""
+        return self._config.strategy
+
+    @property
+    def complex_funcs(self) -> bool:
+        """Whether the represented functions are complex-valued."""
+        return self._complex_funcs
+
+    @property
+    def domain(self) -> tuple[DomainAxis, ...]:
+        """Per-axis ``(start, stop)`` interval the coefficients live on.
+
+        Broadcast against the coefficient shape, so it is empty while the basis
+        holds no coefficients. Callers that know their own mode count (e.g. a
+        model's template basis) should resolve ``config.domain`` themselves.
+        """
+        return self._config.resolve_domain(self.coeff.shape[1:])
+
+    @domain.setter
+    def domain(self, domain: DomainInputType):
+        self._config = self._config.with_domain(domain)
+
+    @property
+    def lengths(self) -> tuple[float, ...]:
+        """Per-axis length ``stop - start`` (Fourier: the spatial/temporal period)."""
+        return domain_lengths(self.domain)
 
     @staticmethod
     @abc.abstractmethod
@@ -185,11 +253,14 @@ class Basis(abc.ABC):
                 res=res_spatial,
                 sampling=ClosedUniform(),
                 strategy=self.strategy,
-                periods=self.periods[1:],
+                domain=self.domain[1:],
             ).unflatten(0, coeff.shape[0:2])
             res_t = res[0]
             t = self.grid(res_t).to(device=device)
-            index_float = t.flatten() / self.periods[0] * (values.shape[1] - 1)
+            t_start, t_stop = self.domain[0]
+            index_float = (
+                (t.flatten() - t_start) / (t_stop - t_start) * (values.shape[1] - 1)
+            )
             values = self.interpolate_time_tensor(values, index_float)
         else:
             res_spatial = res
@@ -198,7 +269,7 @@ class Basis(abc.ABC):
                 res=res_spatial,
                 sampling=ClosedUniform(),
                 strategy=self.strategy,
-                periods=self.periods,
+                domain=self.domain,
             )
 
         values = values.to(self.coeff)
@@ -246,15 +317,15 @@ class Basis(abc.ABC):
         evaluation_dim = (self.ndim + 1) if self.time_dependent else self.ndim
         if res is None:
             modes = self.modes
-            periods = self.periods
+            domain = self.domain
             if self.time_dependent:
                 modes = (self.time_size, *modes)
             return tuple(
-                slice(0, period, mode)
-                for mode, period in zip(modes, periods, strict=False)
+                slice(start, stop, mode)
+                for mode, (start, stop) in zip(modes, domain, strict=False)
             )
         if isinstance(res, int):
-            return tuple(slice(0, period, res) for period in self.periods)
+            return tuple(slice(start, stop, res) for start, stop in self.domain)
         elif isinstance(res, slice):
             return (res,) * evaluation_dim
         return res
@@ -275,7 +346,7 @@ class Basis(abc.ABC):
         Keyword Arguments:
             i {int} -- function i to start plotting (default: {0})
             n {int} -- n functions after function i to evaluate (default: {-1}). The default evaluates all functions
-            res {int | slice | tuple[slice,...] | None} -- function discretization resolution and domain (default: {0:period:dimension modes} domain from 0 to the dimensio period on all dimensions with the same number of points as the dimensions modes each). By default if only an int or a single slice is given, every dimension will share the same range and the resolution is based on the number of dimensions.
+            res {int | slice | tuple[slice,...] | None} -- function discretization resolution and domain (default: {start:stop:dimension modes} using the basis domain on every dimension with the same number of points as the dimension's modes each). By default if only an int or a single slice is given, every dimension will share the same range and the resolution is based on the number of dimensions.
             evaluation_mode {"auto" | "inverse transform" | "basis"} -- coefficient evaluation mode (default: {"auto"}). Auto will use the inverse transform if the number of evaluations is high or res is not provided
             device {torch.device | None} -- device the evaluations are done on (default: {None}). By default, the function will try to use the GPU and fallback on the CPU.
 
@@ -312,7 +383,7 @@ class Basis(abc.ABC):
         Keyword Arguments:
             i {int} -- function i to start plotting (default: {0})
             n {int} -- n functions after function i to evaluate (default: {-1}). The default evaluates all functions
-            res {int | slice | tuple[slice,...] | None} -- function discretization resolution and domain (default: {0:period:dimension modes} domain from 0 to the dimensio period on all dimensions with the same number of points as the dimensions modes each). By default if only an int or a single slice is given, every dimension will share the same range and the resolution is based on the number of dimensions.
+            res {int | slice | tuple[slice,...] | None} -- function discretization resolution and domain (default: {start:stop:dimension modes} using the basis domain on every dimension with the same number of points as the dimension's modes each). By default if only an int or a single slice is given, every dimension will share the same range and the resolution is based on the number of dimensions.
             evaluation_mode {"auto" | "inverse transform" | "basis"} -- coefficient evaluation mode (default: {"auto"}). Auto will use the inverse transform if the number of evaluations is high or res is not provided
             device {torch.device | None} -- device the evaluations are done on (default: {None}). By default, the function will try to use the GPU and fallback on the CPU.
 
@@ -383,7 +454,7 @@ class Basis(abc.ABC):
         i=0,
         n=0,
         time_dependent: Literal[True] | bool = True,
-        periods: PeriodsInputType = None,
+        domain: DomainInputType = None,
         **kwargs,
     ) -> torch.Tensor: ...
 
@@ -398,7 +469,7 @@ class Basis(abc.ABC):
         i=0,
         n=0,
         time_dependent: Literal[False] | bool = False,
-        periods: PeriodsInputType = None,
+        domain: DomainInputType = None,
         **kwargs,
     ) -> torch.Tensor: ...
 
@@ -412,7 +483,7 @@ class Basis(abc.ABC):
         i: int = 0,
         n: int = 0,
         time_dependent: bool = False,
-        periods: PeriodsInputType = None,
+        domain: DomainInputType = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -494,7 +565,7 @@ class Basis(abc.ABC):
         generator: torch.Generator | None = None,
         random_func=torch.randn,
         complex_funcs: bool = False,
-        periods: PeriodsInputType = None,
+        domain: DomainInputType = None,
         **kwargs,
     ) -> Self:
         """
@@ -510,7 +581,7 @@ class Basis(abc.ABC):
             generator {torch.Generator | None} -- PRNG Generator for reproducability (default: {None})
             random_func {callable} -- random function that generates the coefficients (default: {torch.randn})
             complex_funcs {bool} -- whether the functions generated should be complex or not (default: {False})
-            periods {int | float | list[int|float] | tuple[int|float] | None} -- the period for which the coefficients of the basis applies to (default: {None})
+            domain {tuple[float,float] | sequence[tuple[float,float]] | None} -- the per-axis (start, stop) interval the coefficients apply to (default: {None}, i.e. the unit interval (0, 1) on every axis)
 
         Returns:
             Basis -- n sets of functions with coefficients with the shape (n, modes)
@@ -590,12 +661,12 @@ class Basis(abc.ABC):
 
     @staticmethod
     def derivative_eigenvalues(
-        modes: int, period: float, ord: int = 1
+        modes: int, length: float, ord: int = 1
     ) -> torch.Tensor | None:
         """Diagonal differentiation multiplier along one axis, or ``None``.
 
         For a spectral basis whose differentiation operator is *diagonal* in
-        coefficient space (Fourier: ``(2*pi*i*k/period)``; spherical harmonics:
+        coefficient space (Fourier: ``(2*pi*i*k/length)``; spherical harmonics:
         per-degree factors), this returns the length-``modes`` vector that
         ``grad`` multiplies coefficients by (raised to ``ord``). Bases whose
         differentiation is not diagonal (Chebyshev, wavelet) return ``None``.
@@ -627,7 +698,7 @@ class Basis(abc.ABC):
         """
         return self.__class__(
             coeff=self.coeff,
-            periods=self.periods,
+            domain=self.config.domain,
             complex_funcs=self._complex_funcs,
             time_dependent=self.time_dependent,
             sampling=self.sampling,
@@ -826,12 +897,13 @@ class Basis(abc.ABC):
             return copy
 
         res_modes = tuple(
-            slice(0, period, mode)
-            for mode, period in zip(self.modes[1:], self.periods[1:], strict=True)
+            slice(start, stop, mode)
+            for mode, (start, stop) in zip(self.modes[1:], self.domain[1:], strict=True)
         )
         if nt is None:
             nt = self.modes[0]
-        res_modes = (slice(0, self.periods[0], nt), *res_modes)
+        t_start, t_stop = self.domain[0]
+        res_modes = (slice(t_start, t_stop, nt), *res_modes)
 
         val = self.get_values(res=res_modes)
         time_dependent_coeff = self.transform(val.flatten(0, 1)).reshape(
@@ -846,12 +918,13 @@ class Basis(abc.ABC):
         if not self.time_dependent:
             return copy
 
-        # since periods combine time period with spatial period, get only the spatial ones with index [1:]
+        # since domain combines time interval with spatial intervals, get only the spatial ones with index [1:]
         res_modes = tuple(
-            slice(0, period, mode)
-            for mode, period in zip(self.modes, self.periods[1:], strict=True)
+            slice(start, stop, mode)
+            for mode, (start, stop) in zip(self.modes, self.domain[1:], strict=True)
         )
-        res_modes = (slice(0, self.periods[0], self.time_size), *res_modes)
+        t_start, t_stop = self.domain[0]
+        res_modes = (slice(t_start, t_stop, self.time_size), *res_modes)
         val = self.get_values(res=res_modes)
         time_dependent_coeff = self.transform(val)
         copy.time_dependent = False
@@ -866,3 +939,10 @@ class Basis(abc.ABC):
 
 
 BasisSubType = TypeVar("BasisSubType", bound="Basis")
+
+# A ``Basis`` instance carrying coefficients (the field role of the class -- see
+# the class docstring). Alias, not a subclass: it names intent in signatures
+# ("this is a coefficient field, not a bare transform class") without adding a
+# type. Pairs with the stateless transform interface (the class's statics) and
+# :meth:`Basis.from_config`, which mints a field from a :class:`SpectralConfig`.
+SpectralField = Basis
