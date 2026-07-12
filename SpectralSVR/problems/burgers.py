@@ -276,11 +276,16 @@ class Burgers(Problem):
         dt = grid[1, 0, 0] - grid[0, 0, 0]
         dx = grid[0, 1, 1] - grid[0, 0, 1]
 
+        # get_values samples on the endpoint-inclusive ClosedUniform grid, so the
+        # differences are non-periodic (one-sided at the ends). A periodic, wrap-
+        # around stencil would need the values on the basis's half-open sampling
+        # grid, and the choice is per-axis (a domain may be periodic on one axis
+        # and Dirichlet/fixed on another). TODO: drive residual sampling +
+        # per-axis differencing from a per-axis boundary spec. See memory
+        # [[basis-domain-config-refactor]].
         u_t = torch.gradient(u_val, spacing=dt.item(), dim=1, edge_order=2)[0]
-
         u_x = torch.gradient(u_val, spacing=dx.item(), dim=2, edge_order=2)[0]
         u_xx = torch.gradient(u_x, spacing=dx.item(), dim=2, edge_order=2)[0]
-
         uu_x = torch.gradient(
             u_val.pow(2).mul(0.5), spacing=dx.item(), dim=2, edge_order=2
         )[0]

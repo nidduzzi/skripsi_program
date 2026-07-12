@@ -562,9 +562,14 @@ class FourierBasis(Basis):
         )
         if not torch.is_complex(f):
             f = f * (1 + 0j)
+        # inverse-DFT normalisation is 1/N over the MODE count; capture it before
+        # the loop rewrites the shape to the (possibly larger) evaluation
+        # resolution. Dividing by the resolution instead would scale values by
+        # (modes/res)^ndim whenever res != modes (e.g. plotting, residual grids).
+        modes = tuple(f.shape[1:])
         domain = domainInputType_to_tuple(domain, f.shape[1:])
         # Res should by default span the domain, not the unit interval
-        res = transformResType_to_tuple(res, tuple(f.shape[1:]), domain)
+        res = transformResType_to_tuple(res, modes, domain)
 
         # perform 1d transform over every dimension
         for cdim in range(1, ndims):
@@ -579,7 +584,7 @@ class FourierBasis(Basis):
             )
 
         if scale:
-            f = f.div(torch.tensor(f.shape[1:]).prod())
+            f = f.div(torch.tensor(modes).prod())
         return f
 
     def _diff_multiplier(self, dim: int, ord: int) -> torch.Tensor:
@@ -616,17 +621,21 @@ class FourierBasis(Basis):
         if dim == 0 and self.time_dependent:
             return self._finite_diff_time("grad", ord)
         copy = self.copy()
-        coeff = copy.coeff.mul(self._diff_multiplier(dim, ord))
-        coeff[:, ..., 0] = torch.tensor(0 + 0j)
-        copy.coeff = coeff
+        # the k=0 mode along `dim` is already zeroed by its eigenvalue
+        # (2*pi*i*0/L)^ord = 0, so no extra DC handling is needed (and zeroing a
+        # fixed last-axis DC would wrongly wipe a non-`dim` axis for ndim > 1).
+        copy.coeff = copy.coeff.mul(self._diff_multiplier(dim, ord))
         return copy
 
     def integral(self, dim: int = 0, ord: int = 1) -> Self:
         if dim == 0 and self.time_dependent:
             return self._finite_diff_time("integral", ord)
         copy = self.copy()
-        coeff = copy.coeff.div(self._diff_multiplier(dim, ord))
-        coeff[:, ..., 0] = torch.tensor(0 + 0j)
+        multiplier = self._diff_multiplier(dim, ord)
+        coeff = copy.coeff.div(multiplier)
+        # dividing by the zero eigenvalue at `dim`'s k=0 gives inf/nan; drop that
+        # mode (the integration constant) along the correct axis, not the last.
+        coeff = torch.where(multiplier == 0, torch.zeros_like(coeff), coeff)
         copy.coeff = coeff
         return copy
 
