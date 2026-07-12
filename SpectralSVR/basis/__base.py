@@ -1,11 +1,12 @@
 import torch
 import abc
-from typing_extensions import Self, Literal, TypeVar, overload
-from types import ModuleType
-import matplotlib.pyplot as plt
-from matplotlib.axes import Axes
+from typing_extensions import TYPE_CHECKING, Self, Literal, TypeVar, overload
 import logging
 from ..utils import Number, resize_modes, interpolate_tensor, resolve_device
+
+if TYPE_CHECKING:
+    from types import ModuleType
+    from matplotlib.axes import Axes
 # Basis functions
 # - able to set number of modes / basis functions
 # - provides access to the vector of basis function values evaluated at x
@@ -629,12 +630,12 @@ class Basis(abc.ABC):
 
     # TODO: Add plot coefficients function
 
-    def plot(  # noqa: C901
+    def plot(
         self,
         i=0,
         n=1,
         res: ResType | None = None,
-        plt: ModuleType | Axes = plt,
+        plt: "ModuleType | Axes | None" = None,
         complex_scatter=False,
         plot_component: None | Literal["imag", "real"] = None,
         legend: bool = True,
@@ -642,181 +643,40 @@ class Basis(abc.ABC):
         device: torch.device | None = None,
         **kwargs,
     ):
-        """
-        plot
+        """Plot the functions in the basis (delegates to :func:`_plot.plot_basis`).
 
-        plot draws a plot of the functions in the basis, extra keyword arguments are passed to the matplotlib plotting functions.
+        Extra keyword arguments are forwarded to the matplotlib call.
 
         Keyword Arguments:
             i {int} -- function i to start plotting (default: {0})
-            n {int} -- n functions after function i to evaluate (default: {1})
-            res {int | slice | tuple[slice,...] | None} -- function discretization resolution and domain (default: {0:period:200} domain of 200 points from 0 to period of each dimension which is 1 by default on all dimensions). By default if only an int or a single slice is given, every dimension will share the same range and the resolution is based on the number of modes. Currently dimension higher than 2 just uses the inverse transform and ignores this parameter.
-            plt {_type_} -- Axes or pyplot to get plot or imshow from (default: {pyplot})
-            complex_scatter {bool} -- plot the complex values on a scatter plot instead (default: {False})
-            plot_component {None | Literal[&quot;imag&quot;, &quot;real&quot;]} -- plot the imaginary or real values or both if None (default: {None})
-            legend {bool} -- add legend to plots (default: {True})
-            evaluation_mode {"auto" | "inverse transform" | "basis"} -- coefficient evaluation mode (default: {"auto"}). Auto will use the inverse transform if the number of evaluations is high or res is not provided.
-            device {torch.device | None} -- device the evaluations are done on (default: {None}). By default, the function will try to use the GPU and fallback on the CPU.
-
-        Raises:
-            NotImplementedError: TODO: implement dimension higher than 2
-            NotImplementedError: For 2 dimension, no plotting is available, try using complex scatter instead
+            n {int} -- number of functions after i to plot (default: {1})
+            res {int | slice | tuple[slice,...] | None} -- discretization/domain
+                (default: 200 points over each period).
+            plt -- Axes or pyplot module to draw on (default: pyplot).
+            complex_scatter {bool} -- scatter complex values instead (default: False).
+            plot_component {None | "imag" | "real"} -- which component (default: both).
+            legend {bool} -- add a legend (default: True).
+            evaluation_mode -- coefficient evaluation mode (default: "auto").
+            device -- device for evaluation (default: auto GPU/CPU).
 
         Returns:
-            _type_ -- returns the result of the plotting function such as list[Line2D] or AxesImage
+            The matplotlib artist returned by the underlying plotting call.
         """
-        assert i + n <= len(self), (
-            f"values of i={i} and n={n} is out of bounds. i+n needs to be less than or equal to the number of functions {len(self)}"
+        from ._plot import plot_basis
+
+        return plot_basis(
+            self,
+            i=i,
+            n=n,
+            res=res,
+            plt=plt,
+            complex_scatter=complex_scatter,
+            plot_component=plot_component,
+            legend=legend,
+            evaluation_mode=evaluation_mode,
+            device=device,
+            **kwargs,
         )
-        if res is None:
-            res = tuple(slice(0, period, 200) for period in self.periods)
-        plot_dims = self.ndim + 1 if self.time_dependent else self.ndim
-        values, grid = self.get_values_and_grid(
-            i=i, n=n, res=res, evaluation_mode=evaluation_mode, device=device
-        )
-        assert len(values) > 0 or values is None, (
-            "something went wrong in computing the values"
-        )
-        values = values.cpu()
-        grid = grid.cpu()
-
-        match plot_dims:
-            case 1:
-                if self._complex_funcs:
-                    if complex_scatter:
-                        for func in values:
-                            func_flat = func.flatten()
-                            plot = plt.scatter(
-                                func_flat.real,
-                                func_flat.imag,
-                                **kwargs,
-                            )
-                        if legend:
-                            plt.legend(
-                                [f"Function ({i + j})" for j in range(len(values))]
-                            )
-                    else:
-                        match plot_component:
-                            case "real":
-                                for func in values:
-                                    func_flat = func.flatten()
-                                    plot = plt.plot(
-                                        grid.flatten(),
-                                        func_flat.real,
-                                        **kwargs,
-                                    )
-                                if legend:
-                                    plt.legend(
-                                        [
-                                            f"Real function ({i + j})"
-                                            for j in range(len(values))
-                                        ]
-                                    )
-                            case "imag":
-                                for func in values:
-                                    func_flat = func.flatten()
-                                    plot = plt.plot(
-                                        grid.flatten(),
-                                        func_flat.imag,
-                                        linestyle="dashed",
-                                        **kwargs,
-                                    )
-                                if legend:
-                                    plt.legend(
-                                        [
-                                            f"Imaginary function ({i + j})"
-                                            for j in range(len(values))
-                                        ]
-                                    )
-                            case _:
-                                for func in values:
-                                    func_flat = func.flatten()
-                                    plot = plt.plot(
-                                        grid.flatten(),
-                                        func_flat.real,
-                                        **kwargs,
-                                    )
-                                    kwargs["color"] = kwargs.get(
-                                        "color", plot[0].get_color()
-                                    )
-                                    kwargs["linestyle"] = kwargs.get(
-                                        "linestyle", "dashed"
-                                    )
-                                    plot = plt.plot(
-                                        grid.flatten(),
-                                        func_flat.imag,
-                                        **kwargs,
-                                    )
-                                if legend:
-                                    plt.legend(
-                                        [
-                                            f"Real function ({i + j})"
-                                            if k == 0
-                                            else f"Imaginary function ({i + j})"
-                                            for k in range(2)
-                                            for j in range(len(values))
-                                        ]
-                                    )
-                else:
-                    for func in values:
-                        plot = plt.plot(grid.flatten(), func.flatten().real, **kwargs)
-                    if legend:
-                        plt.legend(
-                            [(f"Real function ({i + j})") for j in range(len(values))]
-                        )
-            case 2:
-                if complex_scatter:
-                    for func in values:
-                        func_flat = func.flatten()
-                        plot = plt.scatter(func_flat.real, func_flat.imag, **kwargs)
-                    if legend:
-                        plt.legend([f"Function ({i + j})" for j in range(len(values))])
-                else:
-                    if plot_component is None:
-                        plot_component = "real"
-                        if self._complex_funcs:
-                            logger.warning("plotting only real component")
-                    # TODO: fix by subtracting half pixel length so edges are in the middle of pixels. possible fix by computing pixle length with dividing period with number of pixel.
-                    extent = (
-                        grid[0, 0, 1].item(),
-                        grid[0, -1, 1].item(),
-                        grid[0, 0, 0].item(),
-                        grid[-1, 0, 0].item(),
-                    )
-                    xlim = (
-                        grid[0, 0, 1].item(),
-                        grid[0, -1, 1].item(),
-                    )
-                    ylim = (
-                        grid[0, 0, 0].item(),
-                        grid[-1, 0, 0].item(),
-                    )
-                    kwargs["extent"] = kwargs.get("extent", extent)
-                    kwargs["origin"] = kwargs.get("origin", "lower")
-                    kwargs["aspect"] = kwargs.get("aspect", "auto")
-                    match plot_component:
-                        case "imag":
-                            plot = plt.imshow(values[0].imag, **kwargs)
-                        case "real":
-                            plot = plt.imshow(values[0].real, **kwargs)
-                        case _:  # pragma: no cover  (plot_component is real/imag here)
-                            raise NotImplementedError(
-                                "Can't plot both imaginary and real in 2D"
-                            )
-
-                    if isinstance(plt, Axes):
-                        plt.set_xlim(*xlim)
-                        plt.set_ylim(*ylim)
-                    else:
-                        plt.xlim(*xlim)
-                        plt.ylim(*ylim)
-
-            case _:  # pragma: no cover  (FourierBasis supports at most 2D)
-                raise NotImplementedError(
-                    "plots for dimensions > 2 need to be implemented"
-                )
-
-        return plot
 
     @staticmethod
     def grid(res: ResType = 200) -> torch.Tensor:
