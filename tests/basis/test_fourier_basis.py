@@ -17,23 +17,21 @@ Correctness is additionally cross-checked against PyTorch's own FFT.
 
 import math
 
-import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+import pytest
+import torch
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
+from hypothesis.extra import numpy as hnp
 
-matplotlib.use("Agg")  # headless backend for plot tests
-
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import pytest  # noqa: E402
-import torch  # noqa: E402
-from hypothesis import HealthCheck, given, settings  # noqa: E402
-from hypothesis import strategies as st  # noqa: E402
-from hypothesis.extra import numpy as hnp  # noqa: E402
-
-from SpectralSVR import (  # noqa: E402
+from SpectralSVR import (
     FourierBasis,
     to_complex_coeff,
     to_real_coeff,
 )
+from SpectralSVR.basis import Basis
+from SpectralSVR.basis.sampling import PeriodicUniform
 
 CPU = torch.device("cpu")
 
@@ -91,8 +89,8 @@ def spectra_2d(draw, min_n=2, max_n=10, max_rows=2):
 def test_mms_transform_recovers_spectrum(coeff):
     # Manufacture u from the known spectrum, then the forward transform must
     # return that exact spectrum.
-    u = FourierBasis.inv_transform(coeff, periodic=True)
-    recovered = FourierBasis.transform(u, periodic=True)
+    u = FourierBasis.inv_transform(coeff)
+    recovered = FourierBasis.transform(u)
     assert torch.allclose(recovered, coeff, atol=1e-6)
     # torch.fft agrees on both legs of the manufacture/recover round trip.
     assert torch.allclose(u, torch.fft.ifft(coeff, dim=1), atol=1e-6)
@@ -103,8 +101,8 @@ def test_mms_transform_recovers_spectrum(coeff):
 @SETTINGS
 @given(coeff=spectra_2d())
 def test_mms_transform_recovers_spectrum_2d(coeff):
-    u = FourierBasis.inv_transform(coeff, periodic=True)
-    recovered = FourierBasis.transform(u, periodic=True)
+    u = FourierBasis.inv_transform(coeff)
+    recovered = FourierBasis.transform(u)
     assert torch.allclose(recovered, coeff, atol=1e-5)
     # torch.fft 2D agrees on the manufacture and recovery.
     assert torch.allclose(u, torch.fft.ifft2(coeff, dim=(1, 2)), atol=1e-5)
@@ -126,9 +124,9 @@ def test_mms_grad_is_spectral_derivative(coeff):
     assert torch.allclose(grad_coeff, expected, atol=1e-6)
     # torch.fft-based spectral derivative in value space agrees.
     k_torch = (torch.fft.fftfreq(n) * n).to(coeff)
-    u = FourierBasis.inv_transform(coeff, periodic=True)
+    u = FourierBasis.inv_transform(coeff)
     dval_torch = torch.fft.ifft(torch.fft.fft(u, dim=1) * 2j * torch.pi * k_torch, dim=1)
-    dval_ours = basis.grad().inv_transform(grad_coeff, periodic=True)
+    dval_ours = basis.grad().inv_transform(grad_coeff)
     assert torch.allclose(dval_ours, dval_torch, atol=1e-4, rtol=1e-6)
 
 
@@ -167,7 +165,7 @@ def test_mms_evaluate_matches_inv_transform_on_grid(coeff):
     basis = FourierBasis(coeff)
     grid = torch.arange(0, 1, 1.0 / n, dtype=torch.float64)
     ev = basis(grid, device=CPU)
-    iv = FourierBasis.inv_transform(coeff, periodic=True)
+    iv = FourierBasis.inv_transform(coeff)
     assert torch.allclose(ev, iv, atol=1e-6)
     # both match torch.fft.ifft of the manufactured spectrum on the grid.
     assert torch.allclose(ev, torch.fft.ifft(coeff, dim=1), atol=1e-6)
@@ -179,7 +177,7 @@ def test_mms_evaluate_matches_inv_transform_on_grid(coeff):
 def test_mms_parseval(coeff):
     # Parseval for this DFT convention: sum|u|^2 == (1/N) sum|c|^2.
     n = coeff.shape[1]
-    u = FourierBasis.inv_transform(coeff, periodic=True)
+    u = FourierBasis.inv_transform(coeff)
     lhs = (u.abs() ** 2).sum()
     rhs = (coeff.abs() ** 2).sum() / n
     assert torch.isclose(lhs, rhs, atol=1e-5, rtol=1e-5)
@@ -197,10 +195,10 @@ def test_mms_derivative_of_sine_with_period(amp, freq, period):
     n = 64
     x = torch.arange(0, period, period / n, dtype=torch.float64)
     u = (amp * torch.sin(2 * torch.pi * freq * x / period) + 0j).unsqueeze(0)
-    coeff = FourierBasis.transform(u, periodic=True, periods=period)
+    coeff = FourierBasis.transform(u, periods=period)
     basis = FourierBasis(coeff, periods=period)
     g = basis.grad()
-    dval = g.inv_transform(g.coeff, periodic=True, periods=period).real.flatten()
+    dval = g.inv_transform(g.coeff, periods=period).real.flatten()
     analytic = amp * (2 * torch.pi * freq / period) * torch.cos(
         2 * torch.pi * freq * x / period
     )
@@ -215,9 +213,9 @@ def test_mms_integral_of_cosine(amp, freq):
     n = 128
     x = torch.arange(0, 1, 1.0 / n, dtype=torch.float64)
     u = (amp * torch.cos(2 * torch.pi * freq * x) + 0j).unsqueeze(0)
-    basis = FourierBasis(FourierBasis.transform(u, periodic=True))
+    basis = FourierBasis(FourierBasis.transform(u))
     ig = basis.integral()
-    val = ig.inv_transform(ig.coeff, periodic=True).real.flatten()
+    val = ig.inv_transform(ig.coeff).real.flatten()
     analytic = amp * torch.sin(2 * torch.pi * freq * x) / (2 * torch.pi * freq)
     assert torch.allclose(val, analytic, atol=1e-2)
 
@@ -229,7 +227,7 @@ def test_mms_constant_is_dc_only(amp):
     # Manufactured constant A -> spectrum is A*N at DC, zero elsewhere.
     n = 16
     f = torch.full((1, n), amp, dtype=torch.float64) + 0j
-    coeff = FourierBasis.transform(f, periodic=True)
+    coeff = FourierBasis.transform(f)
     assert torch.isclose(
         coeff[0, 0].real, torch.tensor(amp * n, dtype=torch.float64), atol=1e-4
     )
@@ -245,7 +243,7 @@ def test_mms_cosine_spectrum(freq, amp):
     assert 0 < freq < n // 2
     x = torch.arange(0, 1, 1.0 / n, dtype=torch.float64)
     coeff = FourierBasis.transform(
-        (amp * torch.cos(2 * torch.pi * freq * x) + 0j).unsqueeze(0), periodic=True
+        (amp * torch.cos(2 * torch.pi * freq * x) + 0j).unsqueeze(0)
     )
     peak = torch.tensor(amp * n / 2, dtype=torch.float64)
     assert torch.isclose(coeff[0, freq].real, peak, atol=1e-3)
@@ -260,7 +258,7 @@ def test_mms_cosine_spectrum(freq, amp):
 @given(f=real_signals_1d())
 def test_fuzz_transform_matches_torch_fft(f):
     assert torch.allclose(
-        FourierBasis.transform(f, periodic=True), torch.fft.fft(f, dim=1), atol=1e-6
+        FourierBasis.transform(f), torch.fft.fft(f, dim=1), atol=1e-6
     )
 
 
@@ -269,7 +267,7 @@ def test_fuzz_transform_matches_torch_fft(f):
 @given(coeff=spectra_1d())
 def test_fuzz_inv_transform_matches_torch_ifft(coeff):
     assert torch.allclose(
-        FourierBasis.inv_transform(coeff, periodic=True),
+        FourierBasis.inv_transform(coeff),
         torch.fft.ifft(coeff, dim=1),
         atol=1e-6,
     )
@@ -280,7 +278,7 @@ def test_fuzz_inv_transform_matches_torch_ifft(coeff):
 @given(f=spectra_2d())
 def test_fuzz_transform_matches_torch_fft2(f):
     assert torch.allclose(
-        FourierBasis.transform(f, periodic=True),
+        FourierBasis.transform(f),
         torch.fft.fft2(f, dim=(1, 2)),
         atol=1e-5,
     )
@@ -290,8 +288,8 @@ def test_fuzz_transform_matches_torch_fft2(f):
 @SETTINGS
 @given(f=real_signals_1d())
 def test_fuzz_roundtrip_real(f):
-    coeff = FourierBasis.transform(f, periodic=True)
-    back = FourierBasis.inv_transform(coeff, periodic=True)
+    coeff = FourierBasis.transform(f)
+    back = FourierBasis.inv_transform(coeff)
     assert torch.allclose(back, f, atol=1e-6)
 
 
@@ -299,8 +297,8 @@ def test_fuzz_roundtrip_real(f):
 @SETTINGS
 @given(f=real_signals_1d())
 def test_fuzz_transform_non_fft_path_matches_fft_path(f):
-    fft_path = FourierBasis.transform(f, periodic=True, allow_fft=True)
-    mm_path = FourierBasis.transform(f, periodic=True, allow_fft=False)
+    fft_path = FourierBasis.transform(f)
+    mm_path = FourierBasis.transform(f, sampling=PeriodicUniform(supports_fft=False))
     # The explicit matmul path accumulates more float error than the FFT.
     assert torch.allclose(fft_path, mm_path, atol=1e-3, rtol=1e-4)
 
@@ -312,9 +310,9 @@ def test_fuzz_transform_linearity(a, b, f, g):
     n = min(f.shape[1], g.shape[1])
     rows = min(f.shape[0], g.shape[0])
     f, g = f[:rows, :n], g[:rows, :n]
-    lhs = FourierBasis.transform(a * f + b * g, periodic=True)
-    rhs = a * FourierBasis.transform(f, periodic=True) + b * FourierBasis.transform(
-        g, periodic=True
+    lhs = FourierBasis.transform(a * f + b * g)
+    rhs = a * FourierBasis.transform(f) + b * FourierBasis.transform(
+        g
     )
     assert torch.allclose(lhs, rhs, atol=1e-5)
 
@@ -367,7 +365,7 @@ def test_fuzz_generate_real_signal_has_no_imaginary_part(n, modes, seed):
     coeff = FourierBasis.generate_coeff(
         n, modes, complex_funcs=False, generator=torch.Generator().manual_seed(seed)
     )
-    vals = FourierBasis.inv_transform(coeff, periodic=True)
+    vals = FourierBasis.inv_transform(coeff)
     assert vals.imag.abs().max() < 1e-4
 
 
@@ -429,7 +427,7 @@ def test_inv_transform_requires_2d():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_transform_casts_real_to_complex():
-    assert FourierBasis.transform(torch.randn(1, 8), periodic=True).is_complex()
+    assert FourierBasis.transform(torch.randn(1, 8)).is_complex()
 
 
 @pytest.mark.no_fuzz
@@ -442,8 +440,8 @@ def test_inv_transform_casts_real_input():
 @pytest.mark.no_mms
 def test_transform_res_int_and_slice():
     f = torch.randn(1, 8) + 0j
-    assert FourierBasis.transform(f, res=8, periodic=True).shape == (1, 8)
-    assert FourierBasis.transform(f, res=slice(0, 1, 8), periodic=True).shape == (1, 8)
+    assert FourierBasis.transform(f, res=8).shape == (1, 8)
+    assert FourierBasis.transform(f, res=slice(0, 1, 8)).shape == (1, 8)
 
 
 @pytest.mark.no_fuzz
@@ -517,7 +515,7 @@ def test_call_requires_coeff():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_evaluate_accepts_real_coeff():
-    coeff = FourierBasis.transform(torch.randn(1, 16) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(1, 16) + 0j)
     x = torch.linspace(0, 1, 20)
     out_c = FourierBasis.evaluate(coeff, x)
     out_r = FourierBasis.evaluate(to_real_coeff(coeff), x)  # real coeff path
@@ -527,7 +525,7 @@ def test_evaluate_accepts_real_coeff():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_get_values_res_slice():
-    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 16) + 0j, periodic=True))
+    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 16) + 0j))
     vals = basis.get_values(res=slice(0, 1, 20), device=CPU)
     assert vals.shape[0] == 1
 
@@ -535,7 +533,7 @@ def test_get_values_res_slice():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_get_values_res_tuple():
-    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 16) + 0j, periodic=True))
+    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 16) + 0j))
     vals = basis.get_values(res=(slice(0, 1, 20),), device=CPU)
     assert vals.shape[0] == 1
 
@@ -543,7 +541,7 @@ def test_get_values_res_tuple():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_evaluate_i_n_selection():
-    coeff = FourierBasis.transform(torch.randn(4, 16) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(4, 16) + 0j)
     out = FourierBasis.evaluate(coeff, torch.linspace(0, 1, 20), i=1, n=2)
     assert out.shape[0] == 2
 
@@ -551,7 +549,7 @@ def test_evaluate_i_n_selection():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_evaluate_time_dependent():
-    coeff = FourierBasis.transform(torch.randn(2, 8, 8) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(2, 8, 8) + 0j)
     out = FourierBasis.evaluate(
         coeff, torch.linspace(0, 1, 10).view(-1, 1),
         t=torch.linspace(0, 1, 5), time_dependent=True, periods=(1.0, 1.0),
@@ -562,7 +560,7 @@ def test_evaluate_time_dependent():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_evaluate_time_dependent_requires_t():
-    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j)
     with pytest.raises(AssertionError):
         FourierBasis.evaluate(
             coeff, torch.linspace(0, 1, 5).view(-1, 1),
@@ -598,7 +596,7 @@ def test_generate_complex_funcs_true():
         1, 16, complex_funcs=True, generator=torch.Generator().manual_seed(1)
     )
     assert basis.coeff.is_complex()
-    vals = FourierBasis.inv_transform(basis.coeff, periodic=True)
+    vals = FourierBasis.inv_transform(basis.coeff)
     assert vals.imag.abs().sum() > 0
 
 
@@ -626,7 +624,7 @@ def test_sub_type_error():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_copy_is_independent():
-    coeff = FourierBasis.transform(torch.randn(1, 16) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(1, 16) + 0j)
     a = FourierBasis(coeff)
     b = a.copy()
     b.coeff = b.coeff * 2
@@ -661,7 +659,7 @@ def test_grid_int_arg():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_get_values_and_grid_shapes():
-    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 16) + 0j, periodic=True))
+    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 16) + 0j))
     vals, grid = basis.get_values_and_grid(res=50, device=CPU)
     assert vals.shape[0] == 1 and grid.shape[-1] == 1
 
@@ -669,14 +667,14 @@ def test_get_values_and_grid_shapes():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_get_values_basis_eval_1d():
-    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 16) + 0j, periodic=True))
+    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 16) + 0j))
     assert basis.get_values(res=16, evaluation_mode="basis", device=CPU).shape == (1, 16)
 
 
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_get_values_basis_eval_2d():
-    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j)
     vals = FourierBasis(coeff).get_values(res=8, evaluation_mode="basis", device=CPU)
     assert vals.ndim == 3 and vals.shape[0] == 1
 
@@ -686,7 +684,7 @@ def test_get_values_basis_eval_2d():
 # --------------------------------------------------------------------------- #
 def _time_dependent_basis(modes=8, nt=8):
     torch.manual_seed(0)
-    coeff = FourierBasis.transform(torch.randn(2, modes, modes) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(2, modes, modes) + 0j)
     return FourierBasis(coeff).to_time_dependent(nt=nt)
 
 
@@ -703,7 +701,7 @@ def test_to_time_dependent_and_back():
 @pytest.mark.no_mms
 def test_to_time_dependent_default_nt():
     torch.manual_seed(0)
-    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j)
     td = FourierBasis(coeff).to_time_dependent()  # nt defaults to modes[0]
     assert td.time_dependent and td.time_size == 8
 
@@ -719,7 +717,7 @@ def test_to_time_dependent_idempotent_when_already_time_dependent():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_to_time_independent_noop_when_not_time_dependent():
-    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 8) + 0j, periodic=True))
+    basis = FourierBasis(FourierBasis.transform(torch.randn(1, 8) + 0j))
     out = basis.to_time_independent()  # early-return branch
     assert not out.time_dependent
 
@@ -756,7 +754,7 @@ def test_get_values_time_dependent_inverse_and_basis():
 def test_resize_time_dependent_to_basis_interpolates_time():
     td = _time_dependent_basis(modes=8, nt=8)
     other = FourierBasis(
-        FourierBasis.transform(torch.randn(1, 4, 4) + 0j, periodic=True)
+        FourierBasis.transform(torch.randn(1, 4, 4) + 0j)
     ).to_time_dependent(nt=4)
     resized = td.resize_modes(other)
     assert resized.modes == (4,)
@@ -769,7 +767,7 @@ def test_resize_time_dependent_to_basis_interpolates_time():
 def _real_1d():
     x = torch.arange(0, 1, 1.0 / 32)
     sig = (torch.sin(2 * torch.pi * x) + 0j).unsqueeze(0)
-    return FourierBasis(FourierBasis.transform(sig, periodic=True))
+    return FourierBasis(FourierBasis.transform(sig))
 
 
 def _complex_1d():
@@ -810,7 +808,7 @@ def test_plot_1d_complex_scatter():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_plot_2d_real():
-    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j)
     FourierBasis(coeff).plot(device=CPU)
 
 
@@ -853,7 +851,7 @@ def test_plot_coefficients_1d(component):
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_plot_coefficients_2d():
-    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j)
     FourierBasis(coeff).plot_coefficients()
 
 
@@ -868,10 +866,19 @@ def test_plot_coefficients_on_axes():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_plot_coefficients_time_dependent_raises():
-    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j, periodic=True)
+    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j)
     td = FourierBasis(coeff).to_time_dependent(nt=8)
     with pytest.raises(NotImplementedError):
         td.plot_coefficients()
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_basis_diagonal_hooks_default_to_none():
+    # Base defaults signal "not diagonally differentiable / no de-aliasing rule"
+    # for bases that don't override them (Chebyshev, wavelet).
+    assert Basis.derivative_eigenvalues(8, 1.0) is None
+    assert Basis.dealias_mask(8) is None
 
 
 @pytest.mark.no_fuzz

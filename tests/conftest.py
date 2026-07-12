@@ -11,7 +11,11 @@ A test that satisfies neither is reported as an error so the omission is
 deliberate and visible rather than silent.
 """
 
+import matplotlib
 import pytest
+
+# Use a non-interactive backend so plotting tests run headless.
+matplotlib.use("Agg")
 
 
 def pytest_configure(config: pytest.Config):

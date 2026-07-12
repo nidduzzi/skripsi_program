@@ -6,7 +6,7 @@ from .__base import (
     ResType,
     transformResType_to_tuple,
 )
-from .sampling import FourierAcceptableScheme, PeriodicUniform
+from .sampling import FourierAcceptableScheme, PeriodicUniform, SamplingScheme
 from ..utils import to_complex_coeff
 import torch
 from typing_extensions import Self, Literal, Callable
@@ -309,9 +309,8 @@ class FourierBasis(Basis):
         f: torch.Tensor,
         func: Literal["forward", "inverse"],
         res: slice,
-        periodic: bool,
+        sampling: SamplingScheme,
         period: float,
-        allow_fft: bool,
     ) -> torch.Tensor:
         assert torch.is_complex(f), (
             "f is not complex, cast it to complex first eg. f + 0j"
@@ -324,13 +323,15 @@ class FourierBasis(Basis):
         mode = f.shape[1]
         domain_starts_at_0 = res.start == 0
         domain_end_equal_to_period = res.stop == period
+        # the FFT is only valid on the full periodic grid at the native
+        # resolution; a different res.step would alias, so fall back to the
+        # explicit basis matrix in that case.
         can_use_fft = (
             domain_starts_at_0
             and domain_end_equal_to_period
-            and periodic
-            and allow_fft
-            and mode
-            == res.step  # TODO: using FFT can mess up the transform when evaluating at different resolutions
+            and sampling.is_periodic
+            and sampling.supports_fft
+            and mode == res.step
         )
         if can_use_fft:
             if func == "forward":
@@ -338,12 +339,8 @@ class FourierBasis(Basis):
             elif func == "inverse":
                 F = torch.fft.ifft(f, dim=1, n=res.step, norm="forward")
         else:
-            if periodic:  # tn=t0, {t0,...,tn-1}
-                n = torch.arange(
-                    res.start, res.stop, (res.stop - res.start) / res.step
-                ).to(f)
-            else:
-                n = torch.linspace(res.start, res.stop, res.step).to(f)
+            # the sampling scheme owns node placement over the domain
+            n = sampling.nodes(res.step, res.start, res.stop).to(f)
             e = FourierBasis.fn(
                 n.view(-1, 1),
                 mode,
@@ -366,9 +363,8 @@ class FourierBasis(Basis):
         dim: int,
         func: Literal["forward", "inverse"],
         res: slice,
-        periodic: bool,
+        sampling: SamplingScheme,
         period: float,
-        allow_fft: bool,
     ) -> torch.Tensor:
         # flatten so that each extra dimension is treated as a separate "sample"
         # move dimension to transform to the end so that it can stay intact after f is flatened
@@ -380,9 +376,8 @@ class FourierBasis(Basis):
             f_flatened,
             func=func,
             res=res,
-            periodic=periodic,
+            sampling=sampling,
             period=period,
-            allow_fft=allow_fft,
         )
         # unflatten so that the correct shape is returned
         F_transposed = F_flattened.reshape((*f_transposed.shape[:-1], res.step))
@@ -394,32 +389,28 @@ class FourierBasis(Basis):
     def transform(
         f: torch.Tensor,
         res: ResType | None = None,
-        # TODO: change this to false and adjust affected areas like the notebooks and Basis.get_value()
-        # This should be false because all Basis transforms should have the same
-        # default behavior, in this case is including the end of the grid (non periodicity)
-        # periodicity introduces inconsistency in the assumed grid for other functions built on basis transforms
-        periodic: bool = True,
+        sampling: SamplingScheme | None = None,
         periods: PeriodsInputType = None,
-        allow_fft: bool = True,
         **kwargs,
     ) -> torch.Tensor:
         """
         transform
 
-        Function to calculate the
-        discrete Fourier Transform
-        of complex-valued signal f
+        Discrete Fourier transform of complex-valued signal f.
 
         Arguments:
-            f {torch.Tensor} -- m discretized real valued functions
-            res {tuple[slice,...] | None} -- resolution the function was evaluated at and the bounds of the evaluation (dafault: {None}). When res is None, the evaluation takes the same resolution as f with bounds [0,period) if periodic or [0,period] if not periodic.
-            periodic {bool} -- whether the evaluation grid should include the end or not (periodic) (default: {True})
-            periods: {Number | list[Number] | tuple[Number, ...] | None} -- evaluation period (default: {1})
-            allow_fft {bool} -- allow the use of torch.fft module (default: {True}). By default the function will use fft if possible (domain is [0,1) which is also periodic)
+            f {torch.Tensor} -- m discretized functions (first dim is samples)
+            res {tuple[slice,...] | None} -- resolution/bounds the function was
+                evaluated at (default: same as f, bounds [0, period)).
+            sampling {FourierAcceptableScheme | None} -- how f was sampled;
+                determines the grid periodicity and FFT eligibility (default:
+                PeriodicUniform, i.e. periodic + FFT).
+            periods -- evaluation period (default: 1).
 
         Returns:
             torch.Tensor -- m complex valued coefficients of f
         """
+        sampling = sampling if sampling is not None else PeriodicUniform()
         ndims = len(f.shape)
         assert ndims >= 2, (
             f"f has shape {f.shape}, It needs to have at least two dimensions with the first being m samples"
@@ -437,9 +428,8 @@ class FourierBasis(Basis):
                 dim=cdim,
                 func="forward",
                 res=res[cdim - 1],
-                periodic=periodic,
+                sampling=sampling,
                 period=periods[cdim - 1],
-                allow_fft=allow_fft,
             )
 
         return F
@@ -448,30 +438,30 @@ class FourierBasis(Basis):
     def inv_transform(
         f: torch.Tensor,
         res: ResType | None = None,
-        periodic: bool = True,
+        sampling: SamplingScheme | None = None,
         scale: bool = True,
         periods: PeriodsInputType = None,
-        allow_fft: bool = True,
         **kwargs,
     ):
         """
         inv_transform
 
-        Function to calculate the
-        discrete Inverse Fourier Transform
-        of coefficients F
+        Discrete inverse Fourier transform of coefficients f.
 
         Arguments:
-            f {torch.Tensor} -- m discretized complex valued coefficients with K modes
-            res {tuple[slice,...] | None} -- resolution to evaluate the function at and the bounds of the evaluation (dafault: {None}). When res is None, the evaluation takes the same resolution as f with bounds [0,period) if periodic or [0,period] if not periodic.
-            periodic {bool} -- whether the evaluation grid should include the end or not (periodic) (default: {True})
-            scale {bool} -- whether the outputs are scaled by N or not (default: {True})
-            periods {Number | list[Number] | tuple[Number, ...] | None} -- evaluation period (default: {1})
-            allow_fft {bool} -- allow the use of torch.fft module (default: {True}). By default the function will use fft if possible (domain is [0,1) which is also periodic)
+            f {torch.Tensor} -- m complex coefficient vectors (first dim samples)
+            res {tuple[slice,...] | None} -- resolution/bounds to evaluate at
+                (default: same as f, bounds [0, period)).
+            sampling {FourierAcceptableScheme | None} -- evaluation grid scheme;
+                determines periodicity and FFT eligibility (default:
+                PeriodicUniform).
+            scale {bool} -- whether outputs are scaled by N (default: True).
+            periods -- evaluation period (default: 1).
 
         Returns:
-            torch.Tensor -- m complex valued coefficients of f
+            torch.Tensor -- m function value vectors
         """
+        sampling = sampling if sampling is not None else PeriodicUniform()
         ndims = len(f.shape)
         assert ndims >= 2, (
             f"f has shape {f.shape}, It needs to have at least two dimensions with the first being m samples"
@@ -483,16 +473,14 @@ class FourierBasis(Basis):
         res = transformResType_to_tuple(res, tuple(f.shape[1:]), periods)
 
         # perform 1d transform over every dimension
-        f = f
         for cdim in range(1, ndims):
             f = FourierBasis._ndim_transform(
                 f,
                 dim=cdim,
                 func="inverse",
                 res=res[cdim - 1],
-                periodic=periodic,
+                sampling=sampling,
                 period=periods[cdim - 1],
-                allow_fft=allow_fft,
             )
 
         if scale:

@@ -13,30 +13,36 @@ incompatible scheme is a type error.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 import torch
 
+# These are typing-only Protocols (no isinstance checks), so they are not
+# @runtime_checkable -- that avoids the isinstance overhead. If a runtime check
+# is ever needed, prefer a hasattr-based TypeGuard over runtime_checkable
+# isinstance (benchmark first).
 
-@runtime_checkable
+
 class SamplingScheme(Protocol):
-    """Base protocol: produce ``n`` sample coordinates over ``[start, stop]``."""
+    """Base protocol: produce ``n`` sample coordinates over ``[start, stop]``.
+
+    ``is_periodic`` reports whether the grid is half-open (one period, endpoint
+    excluded); ``supports_fft`` whether a fast transform applies to this grid.
+    """
 
     @property
     def is_periodic(self) -> bool: ...
 
-    def nodes(self, n: int, start: float, stop: float) -> torch.Tensor: ...
-
-
-@runtime_checkable
-class FourierAcceptableScheme(SamplingScheme, Protocol):
-    """Schemes usable by a Fourier basis: equispaced, and FFT-eligible or not."""
-
     @property
     def supports_fft(self) -> bool: ...
 
+    def nodes(self, n: int, start: float, stop: float) -> torch.Tensor: ...
 
-@runtime_checkable
+
+class FourierAcceptableScheme(SamplingScheme, Protocol):
+    """Schemes usable by a Fourier basis (equispaced, FFT-eligible or not)."""
+
+
 class ChebyshevAcceptableScheme(SamplingScheme, Protocol):
     """Schemes usable by a Chebyshev basis (e.g. Gauss-Lobatto nodes)."""
 
@@ -47,11 +53,14 @@ class ChebyshevAcceptableScheme(SamplingScheme, Protocol):
 class PeriodicUniform:
     """Equispaced nodes on the half-open ``[start, stop)`` (one full period).
 
-    The canonical Fourier grid; FFT-eligible.
+    The canonical Fourier grid. FFT-eligible by default; pass
+    ``supports_fft=False`` to force the explicit (matmul) transform path.
     """
 
     is_periodic = True
-    supports_fft = True
+
+    def __init__(self, supports_fft: bool = True) -> None:
+        self.supports_fft = supports_fft
 
     def nodes(self, n: int, start: float, stop: float) -> torch.Tensor:
         step = (stop - start) / n

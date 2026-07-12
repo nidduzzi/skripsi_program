@@ -3,7 +3,7 @@ import abc
 from typing_extensions import TYPE_CHECKING, Self, Literal, TypeVar, overload
 import logging
 from ..utils import Number, resize_modes, interpolate_tensor, resolve_device
-from .sampling import SamplingScheme
+from .sampling import ClosedUniform, SamplingScheme
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -177,7 +177,7 @@ class Basis(abc.ABC):
             values = self.inv_transform(
                 coeff.flatten(0, 1),
                 res=res_spatial,
-                periodic=False,
+                sampling=ClosedUniform(),
                 periods=self.periods[1:],
             ).unflatten(0, coeff.shape[0:2])
             res_t = res[0]
@@ -189,7 +189,7 @@ class Basis(abc.ABC):
             values = self.inv_transform(
                 coeff,
                 res=res_spatial,
-                periodic=False,  # TODO: handle periodicity better
+                sampling=ClosedUniform(),
                 periods=self.periods,
             )
 
@@ -432,7 +432,7 @@ class Basis(abc.ABC):
     def transform(
         f: torch.Tensor,
         res: ResType | None = None,
-        periodic: bool = False,
+        sampling: "SamplingScheme | None" = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -442,8 +442,9 @@ class Basis(abc.ABC):
 
         Arguments:
             f {torch.Tensor} -- m vectors of descretized functions to compute the coefficients of.
-            res {tuple[slice,...] | None} -- resolution to evaluate the function at and the bounds of the evaluation (dafault: {None}). When res is None, the evaluation takes the same resolution as f with bounds [0,1).
-            periodic {bool} -- whether the evaluation grid should include the ends or not (periodic)
+            res {tuple[slice,...] | None} -- resolution to evaluate the function at and the bounds of the evaluation (dafault: {None}). When res is None, the evaluation takes the same resolution as f.
+            sampling {SamplingScheme | None} -- how f was sampled over the domain
+                (node placement / periodicity). Defaults to the basis's scheme.
 
         Returns:
             torch.Tensor -- m vectors of coefficients
@@ -455,18 +456,19 @@ class Basis(abc.ABC):
     def inv_transform(
         f: torch.Tensor,
         res: ResType | None = None,
-        periodic: bool = False,
+        sampling: "SamplingScheme | None" = None,
         **kwargs,
     ) -> torch.Tensor:
         """
         inv_transform
 
-        compute function values from dft coefficients
+        compute function values from coefficients
 
         Arguments:
             f {torch.Tensor} -- m vectors of coefficeints to compute the function values of.
-            res {tuple[slice,...] | None} -- resolution to evaluate the coefficients at and the bounds of the evaluation (dafault: {None}). When res is None, the evaluation takes the same resolution as f with bounds [0,1).
-            periodic {bool} -- whether the evaluation grid should include the ends or not (periodic)
+            res {tuple[slice,...] | None} -- resolution to evaluate the coefficients at and the bounds of the evaluation (dafault: {None}). When res is None, the evaluation takes the same resolution as f.
+            sampling {SamplingScheme | None} -- evaluation grid scheme (node
+                placement / periodicity). Defaults to the basis's scheme.
 
         Returns:
             torch.Tensor -- m vectors of function values

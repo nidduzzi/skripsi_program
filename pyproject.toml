@@ -83,6 +83,8 @@ exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
     "pragma: no cover",
+    "^\\s*\\.\\.\\.$",
+    "class .*\\(.*Protocol.*\\):",
 ]
 
 [tool.mypy]
