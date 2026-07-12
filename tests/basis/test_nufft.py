@@ -23,10 +23,10 @@ SETTINGS = settings(
 )
 
 
-def _exact_evaluate(coeff, x, periods):
+def _exact_evaluate(coeff, x, domain):
     # exact dense path: disable the NUFFT for this call only
     return FourierBasis.evaluate(
-        coeff, x, periods=periods, strategy=_EXACT
+        coeff, x, domain=domain, strategy=_EXACT
     )
 
 
@@ -37,14 +37,18 @@ def _exact_evaluate(coeff, x, periods):
     rows=st.integers(1, 3),
     npts=st.integers(20, 200),
     length=st.floats(0.5, 3.0),
+    start=st.floats(-3.0, 3.0),
     seed=st.integers(0, 10_000),
 )
-def test_nufft_matches_dense_1d(modes, rows, npts, length, seed):
+def test_nufft_matches_dense_1d(modes, rows, npts, length, start, seed):
+    # ``start`` spans 0, so the NUFFT's (x - start) / L normalisation is checked
+    # against the exact path on both canonical and shifted domains.
     g = torch.Generator().manual_seed(seed)
     coeff = FourierBasis.generate_coeff(rows, modes, generator=g).to(torch.complex128)
-    x = (torch.rand(npts, 1, generator=g, dtype=torch.float64) * length)
-    approx = nufft_evaluate(coeff, x, (length,))
-    exact = _exact_evaluate(coeff, x, (length,))
+    x = start + (torch.rand(npts, 1, generator=g, dtype=torch.float64) * length)
+    domain = ((start, start + length),)
+    approx = nufft_evaluate(coeff, x, domain)
+    exact = _exact_evaluate(coeff, x, domain)
     assert (approx - exact).abs().max() < 5e-2 * exact.abs().max()
 
 
@@ -59,8 +63,9 @@ def test_nufft_matches_dense_2d(m, npts, seed):
     g = torch.Generator().manual_seed(seed)
     coeff = FourierBasis.generate_coeff(1, (m, m), generator=g).to(torch.complex128)
     x = torch.rand(npts, 2, generator=g, dtype=torch.float64) * torch.tensor([1.3, 0.7])
-    approx = nufft_evaluate(coeff, x, (1.3, 0.7))
-    exact = _exact_evaluate(coeff, x, (1.3, 0.7))
+    domain = ((0.0, 1.3), (0.0, 0.7))
+    approx = nufft_evaluate(coeff, x, domain)
+    exact = _exact_evaluate(coeff, x, domain)
     assert (approx - exact).abs().max() < 5e-2 * exact.abs().max()
 
 
@@ -74,8 +79,8 @@ def test_evaluate_switches_to_nufft_above_threshold():
         x = torch.rand(2000, dtype=torch.float64) * 1.3
 
         # per-instance overrides -- no global state change
-        exact = FourierBasis(coeff, periods=1.3, strategy=_EXACT)(x, device=CPU)
-        approx = FourierBasis(coeff, periods=1.3, strategy=_FORCE_NUFFT)(x, device=CPU)
+        exact = FourierBasis(coeff, domain=(0.0, 1.3), strategy=_EXACT)(x, device=CPU)
+        approx = FourierBasis(coeff, domain=(0.0, 1.3), strategy=_FORCE_NUFFT)(x, device=CPU)
 
         assert (approx - exact).abs().max() < 5e-2 * exact.abs().max()
     finally:
@@ -98,10 +103,10 @@ def test_dense_evaluate_chunking_is_exact(modes, rows, npts, seed):
 
     # exact matmul (inf threshold); one block vs many small chunks -- per instance
     whole = FourierBasis(
-        coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=float("inf"))
+        coeff, domain=(0.0, 1.0), strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=float("inf"))
     )(x, device=CPU)
     chunked = FourierBasis(
-        coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=1e-4)
+        coeff, domain=(0.0, 1.0), strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=1e-4)
     )(x, device=CPU)
     assert torch.allclose(whole, chunked, atol=1e-12)
 
@@ -122,7 +127,7 @@ def test_dense_evaluate_chunk_bounds_memory():
         x = (torch.rand(npts, dtype=torch.float64)).cpu()
         # exact path (inf threshold), ~1M-entry chunks -- per instance
         basis = FourierBasis(
-            coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=16.0)
+            coeff, domain=(0.0, 1.0), strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=16.0)
         )
         holder: dict = {}
 
@@ -198,7 +203,7 @@ def test_nufft_available():
 def test_nufft_evaluate_shape():
     coeff = FourierBasis.generate_coeff(3, 16).to(torch.complex64)
     x = torch.rand(50, 1)
-    out = nufft_evaluate(coeff, x, (1.0,))
+    out = nufft_evaluate(coeff, x, ((0.0, 1.0),))
     assert out.shape == (3, 50)
     assert out.is_complex()
 
@@ -221,7 +226,7 @@ def test_nufft_evaluate_does_not_materialize_dense_matrix():
     holder: dict = {}
 
     def run():
-        holder["out"] = nufft_evaluate(coeff, x, (1.0,))
+        holder["out"] = nufft_evaluate(coeff, x, ((0.0, 1.0),))
 
     baseline = memory_usage(-1, max_usage=True)
     peak = memory_usage((run, (), {}), max_usage=True, interval=0.02)

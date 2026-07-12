@@ -49,7 +49,7 @@ def plot_basis(  # noqa: C901
         f"or equal to the number of functions {len(basis)}"
     )
     if res is None:
-        res = tuple(slice(0, period, 200) for period in basis.periods)
+        res = tuple(slice(start, stop, 200) for start, stop in basis.domain)
     plot_dims = basis.ndim + 1 if basis.time_dependent else basis.ndim
     values, grid = basis.get_values_and_grid(
         i=i, n=n, res=res, evaluation_mode=evaluation_mode, device=device

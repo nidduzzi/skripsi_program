@@ -69,6 +69,8 @@ class Antiderivative(Problem):
         u_val, grid = u.get_values_and_grid()
         ut_val = ut.get_values()
         dt = grid[1, 0] - grid[0, 0]
+        # non-periodic difference on the ClosedUniform get_values grid (one-sided
+        # ends). See the TODO in Burgers.residual on per-axis periodic sampling.
         u_grad = torch.gradient(u_val, spacing=dt.item(), dim=1)[0]
         residual_val = u_grad - ut_val
         residual = u.copy()

@@ -69,3 +69,34 @@ def cole_hopf_u(x, t, m, a, b, nu, length):
     theta = 1.0 + (aa * decay * torch.cos(k * xg + bb)).sum(dim=1)
     theta_x = (-aa * k * decay * torch.sin(k * xg + bb)).sum(dim=1)
     return -2 * nu * theta_x / theta
+
+
+# --------------------------------------------------------------------------- #
+# Space-time periodic manufactured Burgers field. Unlike Cole-Hopf / heat-mode
+# (which decay in t and so are non-periodic in time), this is periodic on both
+# axes, so it is represented exactly by a 2D Fourier field and its *spectral*
+# time derivative is exact -- the case ``Burgers.spectral_residual`` needs. The
+# forcing ``f`` is built from ANALYTIC derivatives (never from the operator under
+# test), so residual(u, f) == 0 is an independent check.
+# --------------------------------------------------------------------------- #
+def burgers_periodic_manufactured(
+    nt, ns, nu, mx=2, mt=2, amp_x=1.0, amp_t=0.7, length=1.0, t_length=1.0
+):
+    """Return ``(u, f)`` values of shape ``(1, nt, ns)`` for ``u(t, x)``.
+
+    ``u = amp_x sin(kx x) + amp_t sin(wt t)``; ``f = u_t + u u_x - nu u_xx`` with
+    every derivative taken analytically. Band-limited: the nonlinear ``u u_x``
+    reaches wavenumber ``2*mx``, so pick ``ns > 4*mx`` and ``nt > 2*mt``.
+    """
+    x = space_grid(ns, length)
+    t = space_grid(nt, t_length)
+    kx = 2 * math.pi * mx / length
+    wt = 2 * math.pi * mt / t_length
+    X = x.view(1, 1, ns)
+    T = t.view(1, nt, 1)
+    u = amp_x * torch.sin(kx * X) + amp_t * torch.sin(wt * T)  # (1, nt, ns)
+    u_t = (amp_t * wt * torch.cos(wt * T)).expand(1, nt, ns)
+    u_x = (amp_x * kx * torch.cos(kx * X)).expand(1, nt, ns)
+    u_xx = (-amp_x * kx * kx * torch.sin(kx * X)).expand(1, nt, ns)
+    f = u_t + u * u_x - nu * u_xx
+    return u.contiguous(), f.contiguous()

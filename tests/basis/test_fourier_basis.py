@@ -191,21 +191,26 @@ def test_mms_parseval(coeff):
 @given(
     amp=st.floats(0.5, 5.0),
     freq=st.integers(1, 5),
-    period=st.floats(0.5, 4.0),
+    length=st.floats(0.5, 4.0),
+    start=st.floats(-3.0, 3.0),
 )
-def test_mms_derivative_of_sine_with_period(amp, freq, period):
-    # Manufactured u = A sin(2*pi*m*x/L); u' = A(2*pi*m/L) cos(2*pi*m*x/L).
+def test_mms_derivative_of_sine_with_period(amp, freq, length, start):
+    # Manufactured u = A sin(2*pi*m*(x-a)/L) on the domain [a, a+L); its
+    # derivative is A(2*pi*m/L) cos(2*pi*m*(x-a)/L). Fuzzing ``start`` (which
+    # spans 0) exercises both the canonical [0, L) and shifted domains.
     n = 64
-    x = torch.arange(0, period, period / n, dtype=torch.float64)
-    u = (amp * torch.sin(2 * torch.pi * freq * x / period) + 0j).unsqueeze(0)
-    coeff = FourierBasis.transform(u, periods=period)
-    basis = FourierBasis(coeff, periods=period)
+    stop = start + length
+    domain = (start, stop)
+    x = torch.arange(start, stop, length / n, dtype=torch.float64)[:n]
+    u = (amp * torch.sin(2 * torch.pi * freq * (x - start) / length) + 0j).unsqueeze(0)
+    coeff = FourierBasis.transform(u, domain=domain)
+    basis = FourierBasis(coeff, domain=domain)
     g = basis.grad()
-    dval = g.inv_transform(g.coeff, periods=period).real.flatten()
+    dval = g.inv_transform(g.coeff, domain=domain).real.flatten()
     analytic = (
         amp
-        * (2 * torch.pi * freq / period)
-        * torch.cos(2 * torch.pi * freq * x / period)
+        * (2 * torch.pi * freq / length)
+        * torch.cos(2 * torch.pi * freq * (x - start) / length)
     )
     assert torch.allclose(dval, analytic, atol=1e-2)
 
@@ -496,11 +501,14 @@ def test_empty_basis_modes_and_len():
 
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
-def test_modes_ndim_periods_time_size():
-    basis = FourierBasis(FourierBasis.generate_empty(2, (8, 4)), periods=(2.0, 3.0))
+def test_modes_ndim_domain_time_size():
+    basis = FourierBasis(
+        FourierBasis.generate_empty(2, (8, 4)), domain=((0.0, 2.0), (0.0, 3.0))
+    )
     assert basis.modes == (8, 4)
     assert basis.ndim == 2
-    assert basis.periods == (2.0, 3.0)
+    assert basis.domain == ((0.0, 2.0), (0.0, 3.0))
+    assert basis.lengths == (2.0, 3.0)
     assert basis.time_size == 0  # not time dependent
 
 
@@ -560,7 +568,7 @@ def test_evaluate_time_dependent():
         torch.linspace(0, 1, 10).view(-1, 1),
         t=torch.linspace(0, 1, 5),
         time_dependent=True,
-        periods=(1.0, 1.0),
+        domain=((0.0, 1.0), (0.0, 1.0)),
     )
     assert out.shape == (2, 5, 10)
 
@@ -574,7 +582,7 @@ def test_evaluate_time_dependent_requires_t():
             coeff,
             torch.linspace(0, 1, 5).view(-1, 1),
             time_dependent=True,
-            periods=(1.0, 1.0),
+            domain=((0.0, 1.0), (0.0, 1.0)),
         )
 
 
@@ -898,24 +906,29 @@ _EXACT = EvaluationStrategy(allow_approximate=False)
     freq=st.integers(1, 14),
     amp=st.floats(0.3, 4.0),
     length=st.floats(0.5, 3.0),
+    start=st.floats(-3.0, 3.0),
     npts=st.integers(1, 60),
     seed=st.integers(0, 10_000),
 )
-def test_separable_evaluate_single_mode_1d(freq, amp, length, npts, seed):
-    # MMS: coeff of A*exp(2*pi*i*m*x/L) is A*N at wavenumber m. The separable
-    # (exact) evaluate must reproduce that closed form at arbitrary points.
+def test_separable_evaluate_single_mode_1d(freq, amp, length, start, npts, seed):
+    # MMS: coeff of A*exp(2*pi*i*m*(x-a)/L) is A*N at wavenumber m on domain
+    # [a, a+L). The separable (exact) evaluate must reproduce that closed form at
+    # arbitrary points. Fuzzing ``start`` (spanning 0) covers both the canonical
+    # and shifted domains.
     n = 32
     assert 0 < freq < n // 2
     coeff = torch.zeros(1, n, dtype=torch.complex128)
     coeff[0, freq] = amp * n  # fft index == wavenumber for freq < n/2
-    x = (
+    x = start + (
         torch.rand(
             npts, generator=torch.Generator().manual_seed(seed), dtype=torch.float64
         )
         * length
     )
-    got = FourierBasis(coeff, periods=length, strategy=_EXACT)(x, device=CPU)
-    exact = amp * torch.exp(2j * torch.pi * freq * x / length)
+    got = FourierBasis(coeff, domain=(start, start + length), strategy=_EXACT)(
+        x, device=CPU
+    )
+    exact = amp * torch.exp(2j * torch.pi * freq * (x - start) / length)
     assert torch.allclose(got[0], exact, atol=1e-9)
 
 
@@ -924,19 +937,31 @@ def test_separable_evaluate_single_mode_1d(freq, amp, length, npts, seed):
 @given(
     mx=st.integers(1, 3),
     my=st.integers(1, 3),
+    ax=st.floats(-2.0, 2.0),
+    ay=st.floats(-2.0, 2.0),
+    lx=st.floats(0.5, 2.0),
+    ly=st.floats(0.5, 2.0),
     npts=st.integers(1, 40),
     seed=st.integers(0, 10_000),
 )
-def test_separable_evaluate_single_mode_2d(mx, my, npts, seed):
-    # MMS in 2D: separable kernel must reproduce exp(2*pi*i*(mx*x/Lx + my*y/Ly)).
+def test_separable_evaluate_single_mode_2d(mx, my, ax, ay, lx, ly, npts, seed):
+    # MMS in 2D on a per-axis domain [ax, ax+Lx) x [ay, ay+Ly): the separable
+    # kernel must reproduce exp(2*pi*i*(mx*(x-ax)/Lx + my*(y-ay)/Ly)). Fuzzing the
+    # per-axis starts (spanning 0) covers canonical and shifted domains.
     n = 8
-    lx, ly = 1.3, 0.7
     coeff = torch.zeros(1, n, n, dtype=torch.complex128)
     coeff[0, mx, my] = float(n * n)
     g = torch.Generator().manual_seed(seed)
-    x = torch.rand(npts, 2, generator=g, dtype=torch.float64) * torch.tensor([lx, ly])
-    got = FourierBasis(coeff, periods=(lx, ly), strategy=_EXACT)(x, device=CPU)
-    exact = torch.exp(2j * torch.pi * (mx * x[:, 0] / lx + my * x[:, 1] / ly))
+    starts = torch.tensor([ax, ay])
+    x = starts + torch.rand(npts, 2, generator=g, dtype=torch.float64) * torch.tensor(
+        [lx, ly]
+    )
+    got = FourierBasis(coeff, domain=((ax, ax + lx), (ay, ay + ly)), strategy=_EXACT)(
+        x, device=CPU
+    )
+    exact = torch.exp(
+        2j * torch.pi * (mx * (x[:, 0] - ax) / lx + my * (x[:, 1] - ay) / ly)
+    )
     assert torch.allclose(got[0], exact, atol=1e-9)
 
 
@@ -948,7 +973,7 @@ def test_separable_evaluate_on_grid_matches_torch_ifft(n, rows, seed):
     g = torch.Generator().manual_seed(seed)
     coeff = torch.randn(rows, n, dtype=torch.complex128, generator=g)
     grid = torch.arange(0, 1, 1.0 / n, dtype=torch.float64)
-    got = FourierBasis(coeff, periods=1.0, strategy=_EXACT)(grid, device=CPU)
+    got = FourierBasis(coeff, domain=(0.0, 1.0), strategy=_EXACT)(grid, device=CPU)
     assert torch.allclose(got, torch.fft.ifft(coeff, dim=1), atol=1e-9)
 
 
@@ -961,7 +986,9 @@ def test_separable_evaluate_on_grid_matches_torch_ifft2(m, seed):
     ax = torch.arange(0, 1, 1.0 / m, dtype=torch.float64)
     xg, yg = torch.meshgrid(ax, ax, indexing="ij")
     pts = torch.stack([xg.flatten(), yg.flatten()], dim=1)
-    got = FourierBasis(coeff, periods=(1.0, 1.0), strategy=_EXACT)(pts, device=CPU)
+    got = FourierBasis(coeff, domain=((0.0, 1.0), (0.0, 1.0)), strategy=_EXACT)(
+        pts, device=CPU
+    )
     ref = torch.fft.ifft2(coeff, dim=(1, 2)).reshape(1, m * m)
     assert torch.allclose(got, ref, atol=1e-9)
 
@@ -980,14 +1007,14 @@ def test_separable_evaluate_chunking_is_exact(n, npts, seed):
     x = torch.rand(npts, generator=g, dtype=torch.float64)
     whole = FourierBasis(
         coeff,
-        periods=1.0,
+        domain=(0.0, 1.0),
         strategy=EvaluationStrategy(
             allow_approximate=False, memory_budget_mb=float("inf")
         ),
     )(x, device=CPU)
     chunked = FourierBasis(
         coeff,
-        periods=1.0,
+        domain=(0.0, 1.0),
         strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=1e-4),
     )(x, device=CPU)
     assert torch.allclose(whole, chunked, atol=1e-12)

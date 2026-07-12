@@ -59,40 +59,39 @@ class Burgers(Problem):
 
         device = resolve_device()
 
-        L = space_domain.stop - space_domain.start
-        T: float = time_domain.stop - time_domain.start
+        # per-axis (start, stop) intervals -- generation now honours a nonzero
+        # (or negative) start on either axis, not just the lengths.
+        space = (float(space_domain.start), float(space_domain.stop))
+        time = (float(time_domain.start), float(time_domain.stop))
+        T: float = time[1] - time[0]
         nt = int(time_domain.step)
         dt = T / (nt - 1)
         t = basis.grid(time_domain).flatten().to(device=device)
         assert t[1].sub(t[0]).isclose(torch.tensor(dt)), (
             f"Make sure that the result of generating t is consistent with dt ({dt}) and t[1]-t[0] ({t[1] - t[0]})"
         )
-        periods = (T, L)
+        domain = (time, space)
         if isinstance(u0, str) and u0 == "random" and isinstance(f, str) and f == "random":
-            # use method of manufactured solution
-            # generate solution itself since u0 just follows from the generate solution
-            # time_mode = modes[0]
-            spatial_modes = modes[1:]
-            u = basis.generate(n, modes, periods=periods, generator=generator)
-            res_modes = tuple(slice(0, L, mode) for mode in spatial_modes)
+            # method of manufactured solutions: pick a band-limited solution u and
+            # let the forcing be its exact Burgers residual (u0 just follows from u)
+            u_gen, f_gen = self.mms_solution(basis, n, modes, nu, domain, generator=generator)
 
-            fst = self.spectral_residual(u, basis(basis.generate_empty(n, modes)), nu)
-
-            u_gen = u
-            f_gen = fst
-            # convert to timed dependent coeffs
+            # convert the (time, space) fields to time-dependent coefficients
             if time_dependent_coeff:
-                u_val = u.get_values(res=(time_domain, *res_modes))
-                u_coeff = basis.transform(u_val.flatten(0, 1)).reshape(
-                    (n, nt, *spatial_modes)
+                spatial_modes = modes[1:]
+                res_modes = tuple(
+                    slice(space[0], space[1], mode) for mode in spatial_modes
                 )
-                u_gen = basis(coeff=u_coeff, time_dependent=True, periods=periods)
 
-                f_val = fst.get_values(res=(time_domain, *res_modes))
-                f_coeff = basis.transform(f_val.flatten(0, 1)).reshape(
-                    (n, nt, *spatial_modes)
-                )
-                f_gen = basis(coeff=f_coeff, time_dependent=True, periods=periods)
+                def to_time_dependent(field: BasisSubType) -> BasisSubType:
+                    val = field.get_values(res=(time_domain, *res_modes))
+                    coeff = basis.transform(val.flatten(0, 1)).reshape(
+                        (n, nt, *spatial_modes)
+                    )
+                    return basis(coeff=coeff, time_dependent=True, domain=domain)
+
+                u_gen = to_time_dependent(u_gen)
+                f_gen = to_time_dependent(f_gen)
 
         else:
             # Numerical initial-value problem: integrate viscous Burgers with a
@@ -102,7 +101,7 @@ class Burgers(Problem):
                     "numerical Burgers only supports time_dependent_coeff=True"
                 )
             u_gen, f_gen = self._solve_spectral(
-                basis, n, modes, nu, u0, f, periods, t, nt, device, generator
+                basis, n, modes, nu, u0, f, domain, t, nt, device, generator
             )
 
         results = (u_gen, f_gen)
@@ -116,7 +115,7 @@ class Burgers(Problem):
         nu: float,
         u0: "ParamInput | BasisSubType",
         f: "ParamInput | BasisSubType",
-        periods: tuple[float, ...],
+        domain: tuple[tuple[float, float], ...],
         t: torch.Tensor,
         nt: int,
         device: torch.device,
@@ -129,13 +128,13 @@ class Burgers(Problem):
         the basis's ``derivative_eigenvalues``; the transforms use the generic
         ``transform``/``inv_transform``. Works for any basis whose differentiation
         is diagonal (Fourier, spherical harmonics). Solves
-        ``u_t + 0.5 (u^2)_x = nu u_xx + forcing`` on spatial period
-        ``L = periods[1]`` with ``ns = modes[1]`` spatial modes.
+        ``u_t + 0.5 (u^2)_x = nu u_xx + forcing`` on the spatial domain
+        ``domain[1]`` (length ``L``) with ``ns = modes[1]`` spatial modes.
         """
         if len(modes) != 2:
             raise NotImplementedError("numerical Burgers is implemented for 1D space")
         ns = modes[1]
-        length = periods[1]
+        length = domain[1][1] - domain[1][0]
 
         d1 = basis.derivative_eigenvalues(ns, length, ord=1)
         d2 = basis.derivative_eigenvalues(ns, length, ord=2)
@@ -182,10 +181,10 @@ class Burgers(Problem):
 
         sol = etdrk4_solver(linear, nonlinear, v0, t.to(device=device))  # (nt, n, ns)
         u_coeff = sol.movedim(0, 1).to(basis.coeff_dtype)  # (n, nt, ns)
-        u_gen = basis(coeff=u_coeff, time_dependent=True, periods=periods)
+        u_gen = basis(coeff=u_coeff, time_dependent=True, domain=domain)
 
         f_coeff = f_hat.unsqueeze(1).expand(n, nt, ns).to(basis.coeff_dtype).clone()
-        f_gen = basis(coeff=f_coeff, time_dependent=True, periods=periods)
+        f_gen = basis(coeff=f_coeff, time_dependent=True, domain=domain)
         return u_gen, f_gen
 
     def mms_solution(
@@ -194,7 +193,7 @@ class Burgers(Problem):
         n: int,
         modes: tuple[int, ...],
         nu: float,
-        periods: tuple[float, ...],
+        domain: tuple[tuple[float, float], ...],
         generator: torch.Generator | None = None,
     ) -> tuple[BasisSubType, BasisSubType]:
         """Method of Manufactured Solutions for 1D viscous Burgers.
@@ -212,11 +211,11 @@ class Burgers(Problem):
         if len(modes) != 2:
             raise NotImplementedError("MMS Burgers is implemented for 1D space")
         half = tuple(max(1, m // 2) for m in modes)
-        u = basis.generate(n, half, periods=periods, generator=generator).resize_modes(
+        u = basis.generate(n, half, domain=domain, generator=generator).resize_modes(
             modes, rescale=False
         )
-        u = basis(coeff=u.coeff, periods=periods)
-        zero_forcing = basis(basis.generate_empty(n, modes), periods=periods)
+        u = basis(coeff=u.coeff, domain=domain)
+        zero_forcing = basis(basis.generate_empty(n, modes), domain=domain)
         f = self.spectral_residual(u, zero_forcing, nu)
         return u, f
 
@@ -277,11 +276,16 @@ class Burgers(Problem):
         dt = grid[1, 0, 0] - grid[0, 0, 0]
         dx = grid[0, 1, 1] - grid[0, 0, 1]
 
+        # get_values samples on the endpoint-inclusive ClosedUniform grid, so the
+        # differences are non-periodic (one-sided at the ends). A periodic, wrap-
+        # around stencil would need the values on the basis's half-open sampling
+        # grid, and the choice is per-axis (a domain may be periodic on one axis
+        # and Dirichlet/fixed on another). TODO: drive residual sampling +
+        # per-axis differencing from a per-axis boundary spec. See memory
+        # [[basis-domain-config-refactor]].
         u_t = torch.gradient(u_val, spacing=dt.item(), dim=1, edge_order=2)[0]
-
         u_x = torch.gradient(u_val, spacing=dx.item(), dim=2, edge_order=2)[0]
         u_xx = torch.gradient(u_x, spacing=dx.item(), dim=2, edge_order=2)[0]
-
         uu_x = torch.gradient(
             u_val.pow(2).mul(0.5), spacing=dx.item(), dim=2, edge_order=2
         )[0]

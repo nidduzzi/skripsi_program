@@ -26,7 +26,7 @@ def _trained_model(n=80, modes=8, seed=42, kernel="rbf"):
     g = torch.Generator().manual_seed(seed)
     u, ut = Antiderivative().generate(FourierBasis, n, modes, generator=g, u0=0)
     f = to_real_coeff(ut.coeff)  # real input features
-    model = SpectralSVR(FourierBasis(periods=[1.0]), LSSVR(kernel=kernel, C=10.0))
+    model = SpectralSVR(FourierBasis(domain=(0.0, 1.0)), LSSVR(kernel=kernel, C=10.0))
     model.train(f, u.coeff)
     return model, f, u
 
@@ -101,7 +101,7 @@ def test_test_time_dependent_and_complex_funcs(n, nt, modes, seed):
     u_coeff = torch.randn(n, nt, modes, dtype=torch.complex64, generator=g)
     f = torch.randn(n, 12, generator=g)
     model = SpectralSVR(
-        FourierBasis(periods=[1.0, 1.0], complex_funcs=True), LSSVR(kernel="rbf")
+        FourierBasis(domain=((0.0, 1.0), (0.0, 1.0)), complex_funcs=True), LSSVR(kernel="rbf")
     )
     model.train(f, u_coeff, u_time_dependent=True)
     metrics = model.test(f, u_coeff)
@@ -114,7 +114,7 @@ def test_test_time_dependent_and_complex_funcs(n, nt, modes, seed):
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_train_rejects_dtype_mismatch():
-    model = SpectralSVR(FourierBasis(periods=[1.0]), LSSVR())
+    model = SpectralSVR(FourierBasis(domain=(0.0, 1.0)), LSSVR())
     with pytest.raises(ValueError, match="must match the basis coeff_dtype"):
         model.train(torch.randn(10, 16), torch.randn(10, 8))  # real target
 
@@ -138,7 +138,7 @@ def test_forward_rejects_wrong_x_dims():
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_inverse_before_train_raises():
-    model = SpectralSVR(FourierBasis(periods=[1.0]), LSSVR())
+    model = SpectralSVR(FourierBasis(domain=(0.0, 1.0)), LSSVR())
     with pytest.raises(RuntimeError, match="has not been trained"):
         model.inverse_coeff(torch.randn(4, 8, dtype=torch.complex64), epochs=1)
 
@@ -149,7 +149,7 @@ def test_inverse_features_none_when_regressor_prefitted():
     # regressor fitted directly (no SpectralSVR.train) -> features stays None
     reg = LSSVR(kernel="linear", C=10.0)
     reg.fit(torch.randn(12, 16), torch.randn(12, 16))
-    model = SpectralSVR(FourierBasis(periods=[1.0]), reg)
+    model = SpectralSVR(FourierBasis(domain=(0.0, 1.0)), reg)
     with pytest.raises(RuntimeError, match="features is None"):
         model.inverse_coeff(torch.randn(4, 8, dtype=torch.complex64), epochs=1)
 
@@ -161,6 +161,6 @@ def test_train_with_complex_input_features(n, modes, seed):
     # complex input features are converted to interleaved real inside train()
     g = torch.Generator().manual_seed(seed)
     u, ut = Antiderivative().generate(FourierBasis, n, modes, generator=g, u0=0)
-    model = SpectralSVR(FourierBasis(periods=[1.0]), LSSVR(kernel="rbf", C=10.0))
+    model = SpectralSVR(FourierBasis(domain=(0.0, 1.0)), LSSVR(kernel="rbf", C=10.0))
     model.train(ut.coeff, u.coeff)  # complex f
     assert model.features == 2 * modes

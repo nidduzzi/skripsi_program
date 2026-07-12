@@ -8,7 +8,7 @@ gridding (torchkbnufft), at the cost of a small, tunable approximation.
 
 Convention mapping to torchkbnufft's ``KbNufft`` (validated against the exact
 matmul path): reorder each coefficient axis from fft order to natural
-(ascending wavenumber) order, feed ``ktraj = -2*pi*x/period`` per dimension, and
+(ascending wavenumber) order, feed ``ktraj = -2*pi*(x-start)/length`` per dimension, and
 divide the result by ``prod(modes)`` to match ``FourierBasis.evaluate``.
 """
 
@@ -28,14 +28,15 @@ def nufft_available() -> bool:
 
 
 def nufft_evaluate(
-    coeff: torch.Tensor, x: torch.Tensor, periods: tuple[float, ...]
+    coeff: torch.Tensor, x: torch.Tensor, domain: tuple[tuple[float, float], ...]
 ) -> torch.Tensor:
     """Evaluate a (batched) Fourier series at non-uniform points via NUFFT.
 
     Arguments:
         coeff {torch.Tensor} -- (batch, *modes) complex spectrum in fft order.
         x {torch.Tensor} -- (npts, ndim) evaluation points.
-        periods {tuple[float, ...]} -- spatial period per dimension.
+        domain {tuple[tuple[float, float], ...]} -- per-dimension (start, stop)
+            interval; points are normalised as ``(x - start) / (stop - start)``.
 
     Returns:
         torch.Tensor -- (batch, npts) complex values, matching
@@ -55,7 +56,10 @@ def nufft_evaluate(
     image = image.unsqueeze(1)  # (batch, 1, *modes)
 
     ktraj = torch.stack(
-        [(-2 * math.pi * x[:, d] / periods[d]) for d in range(ndim)]
+        [
+            (-2 * math.pi * (x[:, d] - domain[d][0]) / (domain[d][1] - domain[d][0]))
+            for d in range(ndim)
+        ]
     ).to(device=device, dtype=x.real.dtype if x.is_complex() else x.dtype)
 
     nufft = tkbn.KbNufft(im_size=modes).to(device=device, dtype=image.dtype)
