@@ -179,9 +179,14 @@ class FourierBasis(Basis):
     ) -> torch.Tensor:
         """Exact ``sum_k coeff_k exp(2*pi*i*k*x/L)`` over points ``x``.
 
-        Chunked over the points axis so peak memory is O(chunk * prod(modes))
-        instead of materializing the full (npoints * prod(modes)) basis matrix.
-        Exact (no gridding), unlike the NUFFT path.
+        Uses the *separable* structure of the Fourier kernel:
+        ``exp(2*pi*i*sum_d k_d x_d/L_d) = prod_d exp(2*pi*i*k_d x_d/L_d)``.
+        So instead of building the full (npoints * prod(modes)) basis matrix and
+        evaluating that many exponentials, it builds one (npoints * m_d) factor
+        per axis (only ``sum_d npoints*m_d`` exponentials) and contracts them
+        against the coefficients with a single einsum -- far fewer transcendental
+        evaluations and no giant intermediate for ndim >= 2. Chunked over points
+        so peak memory stays O(chunk * max_d(m_d)). Exact (no gridding).
 
         Shapes:
             coeff   -- (batch, *modes) complex spectrum in fft order.
@@ -190,14 +195,33 @@ class FourierBasis(Basis):
             returns -- (batch, npoints) complex, the unscaled sum (evaluate()
                        applies the 1/prod(modes) factor).
         """
-        prod_modes = math.prod(modes)
-        # keep each basis block near chunk_elems complex entries
-        chunk = max(1, chunk_elems // max(1, prod_modes))
+        assert x.shape[1] == len(modes), (
+            f"x has {x.shape[1]} dims but modes has {len(modes)}"
+        )
+        periods_t = periodsInputType_to_tuple(periods, modes)
+        ndim = len(modes)
+        mode_syms = "abcdefghijklmn"[:ndim]  # one contraction index per axis
+        eq = (
+            f"z{mode_syms},"
+            + ",".join(f"y{s}" for s in mode_syms)
+            + "->zy"  # (batch, modes...) x (points, m_d) per axis -> (batch, points)
+        )
+        # chunk points so each per-axis factor holds at most ~chunk_elems entries
+        chunk = max(1, chunk_elems // max(1, max(modes)))
         blocks = []
         for start in range(0, x.shape[0], chunk):
-            # fn() runs first so its shape assertions fire before coeff.flatten
-            basis = cls.fn(x[start : start + chunk], modes, periods=periods)
-            blocks.append(cls.sum_mul(coeff.flatten(1), basis))
+            xb = x[start : start + chunk]
+            factors = [
+                torch.exp(
+                    2j
+                    * torch.pi
+                    * xb[:, d].unsqueeze(-1).to(coeff)
+                    * cls.wave_number(m).flatten().to(coeff)
+                    / periods_t[d]
+                )
+                for d, m in enumerate(modes)
+            ]
+            blocks.append(torch.einsum(eq, coeff, *factors))
         return blocks[0] if len(blocks) == 1 else torch.cat(blocks, dim=-1)
 
     @staticmethod

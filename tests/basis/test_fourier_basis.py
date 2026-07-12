@@ -872,6 +872,109 @@ def test_plot_coefficients_time_dependent_raises():
         td.plot_coefficients()
 
 
+_INF = float("inf")
+
+
+@pytest.mark.mms
+@SETTINGS
+@given(
+    freq=st.integers(1, 14),
+    amp=st.floats(0.3, 4.0),
+    length=st.floats(0.5, 3.0),
+    npts=st.integers(1, 60),
+    seed=st.integers(0, 10_000),
+)
+def test_separable_evaluate_single_mode_1d(freq, amp, length, npts, seed):
+    # MMS: coeff of A*exp(2*pi*i*m*x/L) is A*N at wavenumber m. The separable
+    # (exact) evaluate must reproduce that closed form at arbitrary points.
+    n = 32
+    assert 0 < freq < n // 2
+    coeff = torch.zeros(1, n, dtype=torch.complex128)
+    coeff[0, freq] = amp * n  # fft index == wavenumber for freq < n/2
+    x = torch.rand(npts, generator=torch.Generator().manual_seed(seed), dtype=torch.float64) * length
+    got = FourierBasis(coeff, periods=length, nufft_threshold=_INF)(x, device=CPU)
+    exact = amp * torch.exp(2j * torch.pi * freq * x / length)
+    assert torch.allclose(got[0], exact, atol=1e-9)
+
+
+@pytest.mark.mms
+@SETTINGS
+@given(
+    mx=st.integers(1, 3),
+    my=st.integers(1, 3),
+    npts=st.integers(1, 40),
+    seed=st.integers(0, 10_000),
+)
+def test_separable_evaluate_single_mode_2d(mx, my, npts, seed):
+    # MMS in 2D: separable kernel must reproduce exp(2*pi*i*(mx*x/Lx + my*y/Ly)).
+    n = 8
+    lx, ly = 1.3, 0.7
+    coeff = torch.zeros(1, n, n, dtype=torch.complex128)
+    coeff[0, mx, my] = float(n * n)
+    g = torch.Generator().manual_seed(seed)
+    x = torch.rand(npts, 2, generator=g, dtype=torch.float64) * torch.tensor([lx, ly])
+    got = FourierBasis(coeff, periods=(lx, ly), nufft_threshold=_INF)(x, device=CPU)
+    exact = torch.exp(2j * torch.pi * (mx * x[:, 0] / lx + my * x[:, 1] / ly))
+    assert torch.allclose(got[0], exact, atol=1e-9)
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(n=st.integers(2, 32), rows=st.integers(1, 3), seed=st.integers(0, 10_000))
+def test_separable_evaluate_on_grid_matches_torch_ifft(n, rows, seed):
+    # On the uniform grid, the separable evaluate equals torch.fft.ifft.
+    g = torch.Generator().manual_seed(seed)
+    coeff = torch.randn(rows, n, dtype=torch.complex128, generator=g)
+    grid = torch.arange(0, 1, 1.0 / n, dtype=torch.float64)
+    got = FourierBasis(coeff, periods=1.0, nufft_threshold=_INF)(grid, device=CPU)
+    assert torch.allclose(got, torch.fft.ifft(coeff, dim=1), atol=1e-9)
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(m=st.integers(2, 10), seed=st.integers(0, 10_000))
+def test_separable_evaluate_on_grid_matches_torch_ifft2(m, seed):
+    g = torch.Generator().manual_seed(seed)
+    coeff = torch.randn(1, m, m, dtype=torch.complex128, generator=g)
+    ax = torch.arange(0, 1, 1.0 / m, dtype=torch.float64)
+    xg, yg = torch.meshgrid(ax, ax, indexing="ij")
+    pts = torch.stack([xg.flatten(), yg.flatten()], dim=1)
+    got = FourierBasis(coeff, periods=(1.0, 1.0), nufft_threshold=_INF)(pts, device=CPU)
+    ref = torch.fft.ifft2(coeff, dim=(1, 2)).reshape(1, m * m)
+    assert torch.allclose(got, ref, atol=1e-9)
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(
+    n=st.integers(2, 24),
+    npts=st.integers(1, 100),
+    chunk=st.integers(1, 64),
+    seed=st.integers(0, 10_000),
+)
+def test_separable_evaluate_chunking_is_exact(n, npts, chunk, seed):
+    # Chunking the separable path over points must not change the result.
+    g = torch.Generator().manual_seed(seed)
+    coeff = torch.randn(2, n, dtype=torch.complex128, generator=g)
+    x = torch.rand(npts, generator=g, dtype=torch.float64)
+    whole = FourierBasis(
+        coeff, periods=1.0, nufft_threshold=_INF, dense_chunk_elems=10**12
+    )(x, device=CPU)
+    chunked = FourierBasis(
+        coeff, periods=1.0, nufft_threshold=_INF, dense_chunk_elems=chunk
+    )(x, device=CPU)
+    assert torch.allclose(whole, chunked, atol=1e-12)
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_dealias_mask_keeps_low_frequencies():
+    mask = FourierBasis.dealias_mask(12)
+    k = FourierBasis.wave_number(12).flatten()
+    assert bool(mask[0])  # DC kept
+    assert torch.equal(mask, k.abs() <= (2.0 / 3.0) * 6)
+
+
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
 def test_basis_diagonal_hooks_default_to_none():
