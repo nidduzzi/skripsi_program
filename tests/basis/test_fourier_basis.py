@@ -32,6 +32,7 @@ from SpectralSVR import (
 )
 from SpectralSVR.basis import Basis
 from SpectralSVR.basis.sampling import PeriodicUniform
+from SpectralSVR.basis.strategy import EvaluationStrategy
 
 CPU = torch.device("cpu")
 
@@ -872,7 +873,7 @@ def test_plot_coefficients_time_dependent_raises():
         td.plot_coefficients()
 
 
-_INF = float("inf")
+_EXACT = EvaluationStrategy(allow_approximate=False)
 
 
 @pytest.mark.mms
@@ -892,7 +893,7 @@ def test_separable_evaluate_single_mode_1d(freq, amp, length, npts, seed):
     coeff = torch.zeros(1, n, dtype=torch.complex128)
     coeff[0, freq] = amp * n  # fft index == wavenumber for freq < n/2
     x = torch.rand(npts, generator=torch.Generator().manual_seed(seed), dtype=torch.float64) * length
-    got = FourierBasis(coeff, periods=length, nufft_threshold=_INF)(x, device=CPU)
+    got = FourierBasis(coeff, periods=length, strategy=_EXACT)(x, device=CPU)
     exact = amp * torch.exp(2j * torch.pi * freq * x / length)
     assert torch.allclose(got[0], exact, atol=1e-9)
 
@@ -913,7 +914,7 @@ def test_separable_evaluate_single_mode_2d(mx, my, npts, seed):
     coeff[0, mx, my] = float(n * n)
     g = torch.Generator().manual_seed(seed)
     x = torch.rand(npts, 2, generator=g, dtype=torch.float64) * torch.tensor([lx, ly])
-    got = FourierBasis(coeff, periods=(lx, ly), nufft_threshold=_INF)(x, device=CPU)
+    got = FourierBasis(coeff, periods=(lx, ly), strategy=_EXACT)(x, device=CPU)
     exact = torch.exp(2j * torch.pi * (mx * x[:, 0] / lx + my * x[:, 1] / ly))
     assert torch.allclose(got[0], exact, atol=1e-9)
 
@@ -926,7 +927,7 @@ def test_separable_evaluate_on_grid_matches_torch_ifft(n, rows, seed):
     g = torch.Generator().manual_seed(seed)
     coeff = torch.randn(rows, n, dtype=torch.complex128, generator=g)
     grid = torch.arange(0, 1, 1.0 / n, dtype=torch.float64)
-    got = FourierBasis(coeff, periods=1.0, nufft_threshold=_INF)(grid, device=CPU)
+    got = FourierBasis(coeff, periods=1.0, strategy=_EXACT)(grid, device=CPU)
     assert torch.allclose(got, torch.fft.ifft(coeff, dim=1), atol=1e-9)
 
 
@@ -939,7 +940,7 @@ def test_separable_evaluate_on_grid_matches_torch_ifft2(m, seed):
     ax = torch.arange(0, 1, 1.0 / m, dtype=torch.float64)
     xg, yg = torch.meshgrid(ax, ax, indexing="ij")
     pts = torch.stack([xg.flatten(), yg.flatten()], dim=1)
-    got = FourierBasis(coeff, periods=(1.0, 1.0), nufft_threshold=_INF)(pts, device=CPU)
+    got = FourierBasis(coeff, periods=(1.0, 1.0), strategy=_EXACT)(pts, device=CPU)
     ref = torch.fft.ifft2(coeff, dim=(1, 2)).reshape(1, m * m)
     assert torch.allclose(got, ref, atol=1e-9)
 
@@ -958,10 +959,10 @@ def test_separable_evaluate_chunking_is_exact(n, npts, chunk, seed):
     coeff = torch.randn(2, n, dtype=torch.complex128, generator=g)
     x = torch.rand(npts, generator=g, dtype=torch.float64)
     whole = FourierBasis(
-        coeff, periods=1.0, nufft_threshold=_INF, dense_chunk_elems=10**12
+        coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=float("inf"))
     )(x, device=CPU)
     chunked = FourierBasis(
-        coeff, periods=1.0, nufft_threshold=_INF, dense_chunk_elems=chunk
+        coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=1e-4)
     )(x, device=CPU)
     assert torch.allclose(whole, chunked, atol=1e-12)
 
@@ -973,6 +974,54 @@ def test_dealias_mask_keeps_low_frequencies():
     k = FourierBasis.wave_number(12).flatten()
     assert bool(mask[0])  # DC kept
     assert torch.equal(mask, k.abs() <= (2.0 / 3.0) * 6)
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(
+    budget_mb=st.floats(1e-4, 64.0),
+    per_point=st.integers(1, 4096),
+    itemsize=st.sampled_from([8, 16]),
+)
+def test_strategy_chunk_and_approx_from_budget(budget_mb, per_point, itemsize):
+    s = EvaluationStrategy(memory_budget_mb=budget_mb, allow_approximate=True)
+    budget = s.max_elements(itemsize)
+    chunk = s.chunk_points(per_point, itemsize)
+    assert chunk >= 1
+    # a block stays within (or at) the element budget
+    assert chunk * per_point <= max(per_point, budget)
+    # approximate kicks in exactly when the dense work exceeds the budget
+    assert s.use_approximate(budget + 1, itemsize) is True
+    assert s.use_approximate(budget - 1 if budget > 1 else 0, itemsize) is False
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(budget_mb=st.floats(1e-3, 128.0), per_point=st.integers(1, 4096))
+def test_strategy_budget_scales_with_dtype(budget_mb, per_point):
+    # The element budget must halve when the dtype doubles in size: a fixed byte
+    # budget fits half as many complex128 (16B) entries as complex64 (8B).
+    s = EvaluationStrategy(memory_budget_mb=budget_mb)
+    assert math.isclose(s.max_elements(8), 2 * s.max_elements(16))
+    # so complex128 chunks no more points per block than complex64
+    assert s.chunk_points(per_point, 16) <= s.chunk_points(per_point, 8)
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(per_point=st.integers(1, 8192), itemsize=st.sampled_from([8, 16]), dense=st.floats(1.0, 1e18))
+def test_strategy_infinite_budget_never_approximates(per_point, itemsize, dense):
+    s = EvaluationStrategy(memory_budget_mb=float("inf"))
+    assert s.use_approximate(dense, itemsize) is False
+    assert s.chunk_points(per_point, itemsize) >= 10**6  # effectively one block
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(dense=st.floats(1.0, 1e18), itemsize=st.sampled_from([8, 16]))
+def test_strategy_disallow_approximate(dense, itemsize):
+    s = EvaluationStrategy(memory_budget_mb=0.0, allow_approximate=False)
+    assert s.use_approximate(dense, itemsize) is False  # never approximate
 
 
 @pytest.mark.no_fuzz

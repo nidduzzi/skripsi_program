@@ -4,6 +4,7 @@ from typing_extensions import TYPE_CHECKING, Self, Literal, TypeVar, overload
 import logging
 from ..utils import Number, resize_modes, interpolate_tensor, resolve_device
 from .sampling import ClosedUniform, SamplingScheme
+from .strategy import DEFAULT_EVALUATION_STRATEGY, EvaluationStrategy
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -67,6 +68,7 @@ class Basis(abc.ABC):
         complex_funcs: bool = False,
         time_dependent: bool = False,
         sampling: "SamplingScheme | None" = None,
+        strategy: "EvaluationStrategy | None" = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -79,6 +81,10 @@ class Basis(abc.ABC):
         # injected node-placement strategy; subclass supplies its canonical one
         self.sampling: SamplingScheme = (
             sampling if sampling is not None else self.default_sampling()
+        )
+        # injected evaluation/transform tuning (memory budget, approx allowed)
+        self.strategy: EvaluationStrategy = (
+            strategy if strategy is not None else DEFAULT_EVALUATION_STRATEGY
         )
 
     @staticmethod
@@ -178,6 +184,7 @@ class Basis(abc.ABC):
                 coeff.flatten(0, 1),
                 res=res_spatial,
                 sampling=ClosedUniform(),
+                strategy=self.strategy,
                 periods=self.periods[1:],
             ).unflatten(0, coeff.shape[0:2])
             res_t = res[0]
@@ -190,6 +197,7 @@ class Basis(abc.ABC):
                 coeff,
                 res=res_spatial,
                 sampling=ClosedUniform(),
+                strategy=self.strategy,
                 periods=self.periods,
             )
 
@@ -433,6 +441,7 @@ class Basis(abc.ABC):
         f: torch.Tensor,
         res: ResType | None = None,
         sampling: "SamplingScheme | None" = None,
+        strategy: "EvaluationStrategy | None" = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -457,6 +466,7 @@ class Basis(abc.ABC):
         f: torch.Tensor,
         res: ResType | None = None,
         sampling: "SamplingScheme | None" = None,
+        strategy: "EvaluationStrategy | None" = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -621,6 +631,7 @@ class Basis(abc.ABC):
             complex_funcs=self._complex_funcs,
             time_dependent=self.time_dependent,
             sampling=self.sampling,
+            strategy=self.strategy,
         )
 
     def __sub__(self, other: Self):

@@ -6,7 +6,9 @@ from .__base import (
     ResType,
     transformResType_to_tuple,
 )
+from .__base import EvaluationStrategy
 from .sampling import FourierAcceptableScheme, PeriodicUniform, SamplingScheme
+from .strategy import DEFAULT_EVALUATION_STRATEGY
 from ._nufft import nufft_available, nufft_evaluate
 from ..utils import to_complex_coeff
 import torch
@@ -18,18 +20,6 @@ from functools import partial
 ## Fourier basis
 class FourierBasis(Basis):
     coeff_dtype = torch.complex64
-    # Class-wide DEFAULTS; override per instance via the constructor or by
-    # setting the attribute on an instance (does not affect other instances).
-    #
-    # nufft_threshold: above this many dense basis-matrix elements
-    #   (points * prod(modes)), evaluate() switches to the NUFFT path
-    #   (approximate but far cheaper). Set to float("inf") to always use the
-    #   exact matmul.
-    # dense_chunk_elems: the exact matmul path is chunked over points so a
-    #   basis block holds at most this many complex entries (bounds peak memory
-    #   regardless of npoints).
-    nufft_threshold: float = float(2**22)
-    dense_chunk_elems: int = 2**22
 
     def __init__(
         self,
@@ -38,8 +28,7 @@ class FourierBasis(Basis):
         periods: PeriodsInputType = 1,
         time_dependent: bool = False,
         sampling: FourierAcceptableScheme | None = None,
-        nufft_threshold: float | None = None,
-        dense_chunk_elems: int | None = None,
+        strategy: EvaluationStrategy | None = None,
     ) -> None:
         super().__init__(
             coeff,
@@ -47,12 +36,8 @@ class FourierBasis(Basis):
             time_dependent=time_dependent,
             periods=periods,
             sampling=sampling,
+            strategy=strategy,
         )
-        # None -> inherit the class default; otherwise shadow it on this instance
-        if nufft_threshold is not None:
-            self.nufft_threshold = nufft_threshold
-        if dense_chunk_elems is not None:
-            self.dense_chunk_elems = dense_chunk_elems
 
     @staticmethod
     def default_sampling() -> FourierAcceptableScheme:
@@ -95,8 +80,7 @@ class FourierBasis(Basis):
             i=i,
             n=n,
             time_dependent=self.time_dependent,
-            nufft_threshold=self.nufft_threshold,
-            dense_chunk_elems=self.dense_chunk_elems,
+            strategy=self.strategy,
         )
 
     @classmethod
@@ -109,18 +93,10 @@ class FourierBasis(Basis):
         n=0,
         time_dependent: bool = False,
         periods: PeriodsInputType = None,
-        nufft_threshold: float | None = None,
-        dense_chunk_elems: int | None = None,
+        strategy: EvaluationStrategy | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        # None -> fall back to the class default (per-instance values are passed
-        # in by __call__)
-        nufft_threshold = (
-            cls.nufft_threshold if nufft_threshold is None else nufft_threshold
-        )
-        dense_chunk_elems = (
-            cls.dense_chunk_elems if dense_chunk_elems is None else dense_chunk_elems
-        )
+        strategy = strategy if strategy is not None else DEFAULT_EVALUATION_STRATEGY
         if len(x.shape) == 1:
             x = x.unsqueeze(-1)
 
@@ -157,13 +133,13 @@ class FourierBasis(Basis):
 
         else:
             npoints = x.shape[0]
-            if npoints * math.prod(modes) >= nufft_threshold and nufft_available():
+            dense_elems = npoints * math.prod(modes)
+            itemsize = coeff.element_size()
+            if strategy.use_approximate(dense_elems, itemsize) and nufft_available():
                 # NUFFT already includes the 1/prod(modes) scaling
                 periods_tuple = periodsInputType_to_tuple(periods, modes)
                 return nufft_evaluate(coeff, x, periods_tuple)
-            sum_coeff_x_basis = cls._dense_evaluate(
-                coeff, x, modes, periods, dense_chunk_elems
-            )
+            sum_coeff_x_basis = cls._dense_evaluate(coeff, x, modes, periods, strategy)
 
         scaling = 1.0 / torch.prod(torch.Tensor(modes))
         return scaling * sum_coeff_x_basis
@@ -175,7 +151,7 @@ class FourierBasis(Basis):
         x: torch.Tensor,
         modes: tuple[int, ...],
         periods: PeriodsInputType,
-        chunk_elems: int,
+        strategy: EvaluationStrategy,
     ) -> torch.Tensor:
         """Exact ``sum_k coeff_k exp(2*pi*i*k*x/L)`` over points ``x``.
 
@@ -206,8 +182,9 @@ class FourierBasis(Basis):
             + ",".join(f"y{s}" for s in mode_syms)
             + "->zy"  # (batch, modes...) x (points, m_d) per axis -> (batch, points)
         )
-        # chunk points so each per-axis factor holds at most ~chunk_elems entries
-        chunk = max(1, chunk_elems // max(1, max(modes)))
+        # chunk points so each per-axis factor fits the memory budget; the
+        # per-point cost of the separable path is the largest single axis (m_d)
+        chunk = strategy.chunk_points(max(modes), coeff.element_size())
         blocks = []
         for start in range(0, x.shape[0], chunk):
             xb = x[start : start + chunk]
@@ -406,6 +383,7 @@ class FourierBasis(Basis):
         res: slice,
         sampling: SamplingScheme,
         period: float,
+        strategy: EvaluationStrategy,
     ) -> torch.Tensor:
         assert torch.is_complex(f), (
             "f is not complex, cast it to complex first eg. f + 0j"
@@ -434,16 +412,27 @@ class FourierBasis(Basis):
             elif func == "inverse":
                 F = torch.fft.ifft(f, dim=1, n=res.step, norm="forward")
         else:
-            # the sampling scheme owns node placement over the domain
-            n = sampling.nodes(res.step, res.start, res.stop).to(f)
+            # the sampling scheme owns node placement over the domain (real
+            # coordinates -- do not cast to the complex coeff dtype)
+            n = sampling.nodes(res.step, res.start, res.stop).to(device=f.device)
+            # inverse (coeff -> values at nodes) is a type-2 NUFFT, so route the
+            # large non-uniform case through it instead of the dense (npts*mode)
+            # basis matrix. (The forward/type-1 adjoint would need its own
+            # calibration; it stays on the exact matmul for now.)
+            if (
+                func == "inverse"
+                and strategy.use_approximate(res.step * mode, f.element_size())
+                and nufft_available()
+            ):
+                # nufft_evaluate divides by prod(modes)=mode; _raw_transform
+                # returns the unscaled sum (inv_transform applies 1/N later)
+                return nufft_evaluate(f, n.view(-1, 1), (period,)) * mode
             e = FourierBasis.fn(
-                n.view(-1, 1),
+                n.to(f).view(-1, 1),  # match coeff dtype for the matmul
                 mode,
                 periods=period,
                 constant=sign * 2j * torch.pi,
             )
-            # TODO: fix performance problem with very narrow tensors (eg. size 1x400000 tensors)
-
             F = torch.mm(f, e.T)
 
         assert isinstance(F, torch.Tensor), (
@@ -460,6 +449,7 @@ class FourierBasis(Basis):
         res: slice,
         sampling: SamplingScheme,
         period: float,
+        strategy: EvaluationStrategy,
     ) -> torch.Tensor:
         # flatten so that each extra dimension is treated as a separate "sample"
         # move dimension to transform to the end so that it can stay intact after f is flatened
@@ -473,6 +463,7 @@ class FourierBasis(Basis):
             res=res,
             sampling=sampling,
             period=period,
+            strategy=strategy,
         )
         # unflatten so that the correct shape is returned
         F_transposed = F_flattened.reshape((*f_transposed.shape[:-1], res.step))
@@ -485,6 +476,7 @@ class FourierBasis(Basis):
         f: torch.Tensor,
         res: ResType | None = None,
         sampling: SamplingScheme | None = None,
+        strategy: EvaluationStrategy | None = None,
         periods: PeriodsInputType = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -506,6 +498,7 @@ class FourierBasis(Basis):
             torch.Tensor -- m complex valued coefficients of f
         """
         sampling = sampling if sampling is not None else PeriodicUniform()
+        strategy = strategy if strategy is not None else DEFAULT_EVALUATION_STRATEGY
         ndims = len(f.shape)
         assert ndims >= 2, (
             f"f has shape {f.shape}, It needs to have at least two dimensions with the first being m samples"
@@ -525,6 +518,7 @@ class FourierBasis(Basis):
                 res=res[cdim - 1],
                 sampling=sampling,
                 period=periods[cdim - 1],
+                strategy=strategy,
             )
 
         return F
@@ -534,6 +528,7 @@ class FourierBasis(Basis):
         f: torch.Tensor,
         res: ResType | None = None,
         sampling: SamplingScheme | None = None,
+        strategy: EvaluationStrategy | None = None,
         scale: bool = True,
         periods: PeriodsInputType = None,
         **kwargs,
@@ -557,6 +552,7 @@ class FourierBasis(Basis):
             torch.Tensor -- m function value vectors
         """
         sampling = sampling if sampling is not None else PeriodicUniform()
+        strategy = strategy if strategy is not None else DEFAULT_EVALUATION_STRATEGY
         ndims = len(f.shape)
         assert ndims >= 2, (
             f"f has shape {f.shape}, It needs to have at least two dimensions with the first being m samples"
@@ -576,6 +572,7 @@ class FourierBasis(Basis):
                 res=res[cdim - 1],
                 sampling=sampling,
                 period=periods[cdim - 1],
+                strategy=strategy,
             )
 
         if scale:

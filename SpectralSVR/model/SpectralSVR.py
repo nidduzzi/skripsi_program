@@ -97,6 +97,7 @@ class SpectralSVR(Generic[B, R]):
             x=x,
             periods=periods,
             time_dependent=self.basis.time_dependent,
+            strategy=self.basis.strategy,
         )
 
     def train(

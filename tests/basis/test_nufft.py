@@ -12,6 +12,10 @@ from hypothesis import strategies as st
 
 from SpectralSVR import FourierBasis
 from SpectralSVR.basis._nufft import nufft_available, nufft_evaluate
+from SpectralSVR.basis.strategy import EvaluationStrategy
+
+_EXACT = EvaluationStrategy(allow_approximate=False)
+_FORCE_NUFFT = EvaluationStrategy(memory_budget_mb=0.0, allow_approximate=True)
 
 CPU = torch.device("cpu")
 SETTINGS = settings(
@@ -22,7 +26,7 @@ SETTINGS = settings(
 def _exact_evaluate(coeff, x, periods):
     # exact dense path: disable the NUFFT for this call only
     return FourierBasis.evaluate(
-        coeff, x, periods=periods, nufft_threshold=float("inf")
+        coeff, x, periods=periods, strategy=_EXACT
     )
 
 
@@ -70,10 +74,8 @@ def test_evaluate_switches_to_nufft_above_threshold():
         x = torch.rand(2000, dtype=torch.float64) * 1.3
 
         # per-instance overrides -- no global state change
-        exact = FourierBasis(coeff, periods=1.3, nufft_threshold=float("inf"))(
-            x, device=CPU
-        )
-        approx = FourierBasis(coeff, periods=1.3, nufft_threshold=0)(x, device=CPU)
+        exact = FourierBasis(coeff, periods=1.3, strategy=_EXACT)(x, device=CPU)
+        approx = FourierBasis(coeff, periods=1.3, strategy=_FORCE_NUFFT)(x, device=CPU)
 
         assert (approx - exact).abs().max() < 5e-2 * exact.abs().max()
     finally:
@@ -96,10 +98,10 @@ def test_dense_evaluate_chunking_is_exact(modes, rows, npts, seed):
 
     # exact matmul (inf threshold); one block vs many small chunks -- per instance
     whole = FourierBasis(
-        coeff, periods=1.0, nufft_threshold=float("inf"), dense_chunk_elems=10**12
+        coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=float("inf"))
     )(x, device=CPU)
     chunked = FourierBasis(
-        coeff, periods=1.0, nufft_threshold=float("inf"), dense_chunk_elems=modes
+        coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=1e-4)
     )(x, device=CPU)
     assert torch.allclose(whole, chunked, atol=1e-12)
 
@@ -120,7 +122,7 @@ def test_dense_evaluate_chunk_bounds_memory():
         x = (torch.rand(npts, dtype=torch.float64)).cpu()
         # exact path (inf threshold), ~1M-entry chunks -- per instance
         basis = FourierBasis(
-            coeff, periods=1.0, nufft_threshold=float("inf"), dense_chunk_elems=2**20
+            coeff, periods=1.0, strategy=EvaluationStrategy(allow_approximate=False, memory_budget_mb=16.0)
         )
         holder: dict = {}
 
@@ -131,6 +133,55 @@ def test_dense_evaluate_chunk_bounds_memory():
         peak = memory_usage((run, (), {}), max_usage=True, interval=0.02)
         delta_bytes = max(0.0, peak - baseline) * 1024 * 1024
         assert holder["out"].shape == (1, npts)
+        assert delta_bytes < 0.5 * dense_bytes
+    finally:
+        torch.set_default_dtype(torch.float32)
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(mode=st.integers(8, 40), big=st.integers(400, 2000), seed=st.integers(0, 10_000))
+def test_inv_transform_large_res_matches_dense(mode, big, seed):
+    # inv_transform at a resolution far above the mode count hits the dense
+    # (res x mode) path; forcing the NUFFT there must match the exact matmul.
+    g = torch.Generator().manual_seed(seed)
+    coeff = FourierBasis.generate_coeff(1, mode, generator=g).to(torch.complex128)
+    res = slice(0, 1, big)
+
+    exact = FourierBasis.inv_transform(coeff, res=res, strategy=_EXACT)
+    approx = FourierBasis.inv_transform(coeff, res=res, strategy=_FORCE_NUFFT)
+    assert (approx - exact).abs().max() < 5e-2 * exact.abs().max()
+
+
+@pytest.mark.no_mms
+@settings(deadline=None, max_examples=4, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    mode=st.sampled_from([64, 128]),
+    res=st.sampled_from([200_000, 400_000]),
+    seed=st.integers(0, 10_000),
+)
+def test_inv_transform_nufft_memory_bounded(mode, res, seed):
+    # The NUFFT inverse path must not materialize the dense (res x mode) basis
+    # matrix. Force the NUFFT and check the peak RSS stays well under it.
+    from memory_profiler import memory_usage
+
+    torch.set_default_dtype(torch.float64)
+    try:
+        g = torch.Generator().manual_seed(seed)
+        coeff = FourierBasis.generate_coeff(1, mode, generator=g).to(torch.complex128)
+        dense_bytes = res * mode * 16
+        holder: dict = {}
+
+        def run():
+            holder["out"] = FourierBasis.inv_transform(
+                coeff, res=slice(0, 1, res), strategy=_FORCE_NUFFT
+            )
+
+        baseline = memory_usage(-1, max_usage=True)
+        peak = memory_usage((run, (), {}), max_usage=True, interval=0.02)
+        delta_bytes = max(0.0, peak - baseline) * 1024 * 1024
+        assert holder["out"].shape == (1, res)
+        assert not torch.isnan(holder["out"]).any()
         assert delta_bytes < 0.5 * dense_bytes
     finally:
         torch.set_default_dtype(torch.float32)
