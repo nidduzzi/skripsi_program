@@ -253,8 +253,10 @@ def _safe_r2(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 
 
 # Default metric set; inject a different mapping into get_metrics to override.
-# TODO: trace problem of rse and rrse values blowing up when a model trained
-# with noise is tested against the clean version of u_coeff_targets
+# NOTE: rse/rrse (relative squared error) are normalized by the target
+# variance, so they blow up when the targets have near-zero variance (e.g.
+# evaluating a noise-trained model against clean, nearly-constant targets).
+# This is inherent to the metric; prefer mse/rmse in that regime.
 DEFAULT_METRICS: dict[str, MetricFn] = {
     "mse": mean_squared_error,
     "rmse": partial(mean_squared_error, squared=False),

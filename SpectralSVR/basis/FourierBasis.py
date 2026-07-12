@@ -270,57 +270,32 @@ class FourierBasis(Basis):
         n_modes = len(modes)
         assert n_modes > 0, "modes should have at least one element"
         random_func = partial(random_func, generator=generator)
-        if complex_funcs:
-            coeff = random_func((n, *modes), dtype=torch.complex64)
-        else:
-            coeff = random_func((n, *modes), dtype=torch.complex64)
-            # TODO: replace with more efficient algo
-            # Analysis of fourier transform outputs
-            # dims = 2
-            # mode = 8
-            # modes = (mode,) * dims
-            # tmp = FourierBasis.generate(1, modes, complex_funcs=True)
-            # tmp_coeff = resize_modes(
-            #     FourierBasis.transform(
-            #         tmp(FourierBasis.grid([slice(0, 1, 200), slice(0, 1, 200)]).flatten(0, -2))
-            #         .real.add(0j)
-            #         .reshape((1, 200, 200))
-            #     ),
-            #     modes,
-            # )
-            # def get_reflected_modes(tmp_coeff):
-            #     from functools import reduce
-
-            #     dims = torch.tensor(tmp_coeff.shape[1:])
-            #     n = 0
-            #     results = []
-            #     for num in range(torch.prod(dims)):
-            #         idx = tuple(
-            #             reduce(
-            #                 lambda a, b: a // b,
-            #                 dims[i + 1 :].tolist() if i + 1 < len(dims) else [],
-            #                 num,
-            #             )
-            #             % dims[i].item()
-            #             for i in range(len(dims))
-            #         )
-            #         # for k in range(dims[2]):
-            #         eq_conj = tmp_coeff[n].isclose(tmp_coeff[(n, *idx)].conj(), 0.001)
-            #         # eq_conj = tmp_coeff[n].isclose(tmp_coeff[n, i, j, k].conj(), 0.001)
-            #         num_eq = eq_conj.sum()
-            #         results.append((idx, num_eq, eq_conj.nonzero()))
-            #     return sum(map(lambda x: x[1].item(), results)), torch.prod(dims).item(), results
-
-            # get_reflected_modes(tmp_coeff)
-
-            vals = cls.inv_transform(coeff)
-            coeff = cls.transform(vals.real + 0j)
+        coeff = random_func((n, *modes), dtype=torch.complex64)
+        if not complex_funcs:
+            # Real-valued functions need a conjugate-symmetric spectrum.
+            coeff = cls.enforce_hermitian(coeff)
         if scale:
-            # TODO: fix this to be more exact
+            # Heuristic amplitude so generated functions have O(1) magnitude
+            # regardless of mode count (the inverse DFT sums prod(modes) terms).
             scaler = torch.tensor(modes).sum() * 0.2
             coeff = coeff.mul(scaler)
-            # pass
         return coeff
+
+    @staticmethod
+    def enforce_hermitian(coeff: torch.Tensor) -> torch.Tensor:
+        """Project a spectrum onto Hermitian symmetry so its inverse is real.
+
+        A real signal has a conjugate-symmetric spectrum, ``X[k] = conj(X[-k])``.
+        In fft ordering the ``-k`` reindex of an axis is ``flip`` then ``roll(1)``
+        (0->0, 1->N-1, 2->N-2, ...). Averaging with the conjugate of that
+        frequency-mirrored spectrum enforces the symmetry over every mode axis
+        (axis 0 is the sample axis and is left untouched); DC and Nyquist map to
+        themselves and become real.
+        """
+        mirror = coeff
+        for dim in range(1, coeff.ndim):
+            mirror = torch.flip(mirror, (dim,)).roll(1, dim)
+        return 0.5 * (coeff + mirror.conj())
 
     @staticmethod
     def _raw_transform(
@@ -568,6 +543,26 @@ class FourierBasis(Basis):
     def copy(self) -> Self:
         basis_copy = super().copy()
         return basis_copy
+
+    def plot_coefficients(
+        self,
+        i: int = 0,
+        n: int = 1,
+        plt=None,
+        component: Literal["magnitude", "real", "imag"] = "magnitude",
+        legend: bool = True,
+        **kwargs,
+    ):
+        """Plot the Fourier spectrum: coefficient ``component`` versus wavenumber.
+
+        1D bases plot against (frequency-sorted) wavenumbers; 2D bases show the
+        (fft-shifted) coefficient grid via imshow.
+        """
+        from ._plot import plot_fourier_coefficients
+
+        return plot_fourier_coefficients(
+            self, i=i, n=n, plt=plt, component=component, legend=legend, **kwargs
+        )
 
     @staticmethod
     def prefered_evaluation_mode() -> EvaluationModeType:

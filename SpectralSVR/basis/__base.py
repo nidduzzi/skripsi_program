@@ -628,7 +628,20 @@ class Basis(abc.ABC):
                 f"unsupported operand type(s) for +: '{self.__class__}' and '{type(other)}'"
             )
 
-    # TODO: Add plot coefficients function
+    @abc.abstractmethod
+    def plot_coefficients(
+        self,
+        i: int = 0,
+        n: int = 1,
+        plt: "ModuleType | Axes | None" = None,
+        **kwargs,
+    ):
+        """Plot the basis coefficients (the spectrum) of ``n`` functions from ``i``.
+
+        Each basis renders its own natural view of its coefficients (Fourier:
+        magnitude/phase versus wavenumber; Chebyshev/wavelet: their own layouts),
+        so this is abstract. Extra keyword arguments are forwarded to matplotlib.
+        """
 
     def plot(
         self,

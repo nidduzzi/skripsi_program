@@ -10,12 +10,12 @@ import logging
 from types import ModuleType
 from typing import TYPE_CHECKING, Literal
 
+import torch
 from matplotlib.axes import Axes
 
 if TYPE_CHECKING:
     from .__base import AutoEvaluationModeType, Basis, ResType
-
-    import torch
+    from .FourierBasis import FourierBasis
 
 logger = logging.getLogger(__name__)
 
@@ -140,15 +140,16 @@ def plot_basis(  # noqa: C901
                     plot_component = "real"
                     if basis._complex_funcs:
                         logger.warning("plotting only real component")
-                # TODO: subtract half a pixel so edges sit at pixel centres.
-                extent = (
-                    grid[0, 0, 1].item(),
-                    grid[0, -1, 1].item(),
-                    grid[0, 0, 0].item(),
-                    grid[-1, 0, 0].item(),
-                )
-                xlim = (grid[0, 0, 1].item(), grid[0, -1, 1].item())
-                ylim = (grid[0, 0, 0].item(), grid[-1, 0, 0].item())
+                # imshow places pixel *edges* at the extent bounds while the grid
+                # holds pixel *centres*, so expand the extent by half a pixel on
+                # each side to align the image with the sample coordinates.
+                x0, x1 = grid[0, 0, 1].item(), grid[0, -1, 1].item()
+                y0, y1 = grid[0, 0, 0].item(), grid[-1, 0, 0].item()
+                half_dx = (x1 - x0) / (2 * (grid.shape[1] - 1)) if grid.shape[1] > 1 else 0.0
+                half_dy = (y1 - y0) / (2 * (grid.shape[0] - 1)) if grid.shape[0] > 1 else 0.0
+                extent = (x0 - half_dx, x1 + half_dx, y0 - half_dy, y1 + half_dy)
+                xlim = (x0, x1)
+                ylim = (y0, y1)
                 kwargs["extent"] = kwargs.get("extent", extent)
                 kwargs["origin"] = kwargs.get("origin", "lower")
                 kwargs["aspect"] = kwargs.get("aspect", "auto")
@@ -172,4 +173,55 @@ def plot_basis(  # noqa: C901
         case _:  # pragma: no cover  (at most 2D is supported)
             raise NotImplementedError("plots for dimensions > 2 need to be implemented")
 
+    return plot
+
+
+def _component(coeff: torch.Tensor, component: str) -> torch.Tensor:
+    match component:
+        case "magnitude":
+            return coeff.abs()
+        case "real":
+            return coeff.real
+        case "imag":
+            return coeff.imag
+        case _:
+            raise ValueError(f"unknown component {component!r}")
+
+
+def plot_fourier_coefficients(
+    basis: "FourierBasis",
+    i: int = 0,
+    n: int = 1,
+    plt: "ModuleType | Axes | None" = None,
+    component: Literal["magnitude", "real", "imag"] = "magnitude",
+    legend: bool = True,
+    **kwargs,
+):
+    """Plot the Fourier spectrum of ``n`` functions from ``i``; see
+    :meth:`FourierBasis.plot_coefficients`."""
+    plt = _resolve_canvas(plt)
+    if basis.time_dependent:
+        raise NotImplementedError(
+            "plot_coefficients is not implemented for time-dependent bases"
+        )
+    coeff = basis.coeff[i : i + n].detach().cpu()
+    modes = basis.modes
+
+    if len(modes) == 1:
+        wn = basis.wave_number(modes[0]).flatten().cpu()
+        order = torch.argsort(wn)
+        for c in coeff:
+            plot = plt.plot(wn[order], _component(c[order], component), **kwargs)
+        if legend:
+            plt.legend([f"Function ({i + j})" for j in range(len(coeff))])
+    elif len(modes) == 2:
+        # fft-shift so the zero frequency sits at the centre of the image
+        shifted = torch.fft.fftshift(coeff[0])
+        kwargs["origin"] = kwargs.get("origin", "lower")
+        kwargs["aspect"] = kwargs.get("aspect", "auto")
+        plot = plt.imshow(_component(shifted, component), **kwargs)
+    else:
+        raise NotImplementedError(
+            "plot_coefficients supports 1D and 2D Fourier bases"
+        )
     return plot

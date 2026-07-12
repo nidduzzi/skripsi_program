@@ -845,5 +845,36 @@ def test_plot_out_of_bounds():
 
 @pytest.mark.no_fuzz
 @pytest.mark.no_mms
+@pytest.mark.parametrize("component", ["magnitude", "real", "imag"])
+def test_plot_coefficients_1d(component):
+    _real_1d().plot_coefficients(n=1, component=component)
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_plot_coefficients_2d():
+    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j, periodic=True)
+    FourierBasis(coeff).plot_coefficients()
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_plot_coefficients_on_axes():
+    _fig, ax = plt.subplots()
+    _complex_1d().plot_coefficients(plt=ax)
+    plt.close(_fig)
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_plot_coefficients_time_dependent_raises():
+    coeff = FourierBasis.transform(torch.randn(1, 8, 8) + 0j, periodic=True)
+    td = FourierBasis(coeff).to_time_dependent(nt=8)
+    with pytest.raises(NotImplementedError):
+        td.plot_coefficients()
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
 def test_math_import_smoke():
     assert math.isclose(float(torch.pi), math.pi, rel_tol=1e-6)
