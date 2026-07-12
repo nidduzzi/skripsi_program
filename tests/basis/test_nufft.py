@@ -20,15 +20,10 @@ SETTINGS = settings(
 
 
 def _exact_evaluate(coeff, x, periods):
-    # exact dense path (threshold disabled)
-    saved = FourierBasis.nufft_threshold
-    FourierBasis.nufft_threshold = None
-    try:
-        return FourierBasis(coeff, periods=periods).__class__.evaluate(
-            coeff, x, periods=periods
-        )
-    finally:
-        FourierBasis.nufft_threshold = saved
+    # exact dense path: disable the NUFFT for this call only
+    return FourierBasis.evaluate(
+        coeff, x, periods=periods, nufft_threshold=float("inf")
+    )
 
 
 @pytest.mark.no_mms
@@ -72,17 +67,71 @@ def test_evaluate_switches_to_nufft_above_threshold():
     try:
         g = torch.Generator().manual_seed(0)
         coeff = FourierBasis.generate_coeff(1, 32, generator=g).to(torch.complex128)
-        basis = FourierBasis(coeff, periods=1.3)
         x = torch.rand(2000, dtype=torch.float64) * 1.3
 
-        saved = FourierBasis.nufft_threshold
-        FourierBasis.nufft_threshold = None
-        exact = basis(x, device=CPU)
-        FourierBasis.nufft_threshold = 0  # force NUFFT
-        approx = basis(x, device=CPU)
-        FourierBasis.nufft_threshold = saved
+        # per-instance overrides -- no global state change
+        exact = FourierBasis(coeff, periods=1.3, nufft_threshold=float("inf"))(
+            x, device=CPU
+        )
+        approx = FourierBasis(coeff, periods=1.3, nufft_threshold=0)(x, device=CPU)
 
         assert (approx - exact).abs().max() < 5e-2 * exact.abs().max()
+    finally:
+        torch.set_default_dtype(torch.float32)
+
+
+@pytest.mark.no_mms
+@SETTINGS
+@given(
+    modes=st.integers(4, 32),
+    rows=st.integers(1, 3),
+    npts=st.integers(1, 200),
+    seed=st.integers(0, 10_000),
+)
+def test_dense_evaluate_chunking_is_exact(modes, rows, npts, seed):
+    # Chunking the exact path must not change the result vs a single block.
+    g = torch.Generator().manual_seed(seed)
+    coeff = FourierBasis.generate_coeff(rows, modes, generator=g).to(torch.complex128)
+    x = torch.rand(npts, generator=g, dtype=torch.float64)
+
+    # exact matmul (inf threshold); one block vs many small chunks -- per instance
+    whole = FourierBasis(
+        coeff, periods=1.0, nufft_threshold=float("inf"), dense_chunk_elems=10**12
+    )(x, device=CPU)
+    chunked = FourierBasis(
+        coeff, periods=1.0, nufft_threshold=float("inf"), dense_chunk_elems=modes
+    )(x, device=CPU)
+    assert torch.allclose(whole, chunked, atol=1e-12)
+
+
+@pytest.mark.no_fuzz
+@pytest.mark.no_mms
+def test_dense_evaluate_chunk_bounds_memory():
+    # The exact (matmul) path, chunked, must also stay well under the full
+    # dense (npts x modes) basis matrix.
+    from memory_profiler import memory_usage
+
+    torch.set_default_dtype(torch.float64)
+    try:
+        modes = 128
+        npts = 400_000
+        dense_bytes = npts * modes * 16
+        coeff = FourierBasis.generate_coeff(1, modes).to(torch.complex128).cpu()
+        x = (torch.rand(npts, dtype=torch.float64)).cpu()
+        # exact path (inf threshold), ~1M-entry chunks -- per instance
+        basis = FourierBasis(
+            coeff, periods=1.0, nufft_threshold=float("inf"), dense_chunk_elems=2**20
+        )
+        holder: dict = {}
+
+        def run():
+            holder["out"] = basis(x, device=CPU)
+
+        baseline = memory_usage(-1, max_usage=True)
+        peak = memory_usage((run, (), {}), max_usage=True, interval=0.02)
+        delta_bytes = max(0.0, peak - baseline) * 1024 * 1024
+        assert holder["out"].shape == (1, npts)
+        assert delta_bytes < 0.5 * dense_bytes
     finally:
         torch.set_default_dtype(torch.float32)
 

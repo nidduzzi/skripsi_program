@@ -18,10 +18,18 @@ from functools import partial
 ## Fourier basis
 class FourierBasis(Basis):
     coeff_dtype = torch.complex64
-    # Above this many dense basis-matrix elements (points * prod(modes)),
-    # evaluate() switches to the NUFFT path (approximate but far cheaper in
-    # memory/time). Set to None to always use the exact matmul.
-    nufft_threshold: int | None = 2**22
+    # Class-wide DEFAULTS; override per instance via the constructor or by
+    # setting the attribute on an instance (does not affect other instances).
+    #
+    # nufft_threshold: above this many dense basis-matrix elements
+    #   (points * prod(modes)), evaluate() switches to the NUFFT path
+    #   (approximate but far cheaper). Set to float("inf") to always use the
+    #   exact matmul.
+    # dense_chunk_elems: the exact matmul path is chunked over points so a
+    #   basis block holds at most this many complex entries (bounds peak memory
+    #   regardless of npoints).
+    nufft_threshold: float = float(2**22)
+    dense_chunk_elems: int = 2**22
 
     def __init__(
         self,
@@ -30,6 +38,8 @@ class FourierBasis(Basis):
         periods: PeriodsInputType = 1,
         time_dependent: bool = False,
         sampling: FourierAcceptableScheme | None = None,
+        nufft_threshold: float | None = None,
+        dense_chunk_elems: int | None = None,
     ) -> None:
         super().__init__(
             coeff,
@@ -38,6 +48,11 @@ class FourierBasis(Basis):
             periods=periods,
             sampling=sampling,
         )
+        # None -> inherit the class default; otherwise shadow it on this instance
+        if nufft_threshold is not None:
+            self.nufft_threshold = nufft_threshold
+        if dense_chunk_elems is not None:
+            self.dense_chunk_elems = dense_chunk_elems
 
     @staticmethod
     def default_sampling() -> FourierAcceptableScheme:
@@ -80,6 +95,8 @@ class FourierBasis(Basis):
             i=i,
             n=n,
             time_dependent=self.time_dependent,
+            nufft_threshold=self.nufft_threshold,
+            dense_chunk_elems=self.dense_chunk_elems,
         )
 
     @classmethod
@@ -92,8 +109,18 @@ class FourierBasis(Basis):
         n=0,
         time_dependent: bool = False,
         periods: PeriodsInputType = None,
+        nufft_threshold: float | None = None,
+        dense_chunk_elems: int | None = None,
         **kwargs,
     ) -> torch.Tensor:
+        # None -> fall back to the class default (per-instance values are passed
+        # in by __call__)
+        nufft_threshold = (
+            cls.nufft_threshold if nufft_threshold is None else nufft_threshold
+        )
+        dense_chunk_elems = (
+            cls.dense_chunk_elems if dense_chunk_elems is None else dense_chunk_elems
+        )
         if len(x.shape) == 1:
             x = x.unsqueeze(-1)
 
@@ -130,20 +157,48 @@ class FourierBasis(Basis):
 
         else:
             npoints = x.shape[0]
-            threshold = cls.nufft_threshold
-            if (
-                threshold is not None
-                and npoints * math.prod(modes) >= threshold
-                and nufft_available()
-            ):
+            if npoints * math.prod(modes) >= nufft_threshold and nufft_available():
                 # NUFFT already includes the 1/prod(modes) scaling
                 periods_tuple = periodsInputType_to_tuple(periods, modes)
                 return nufft_evaluate(coeff, x, periods_tuple)
-            basis = cls.fn(x, modes, periods=periods)
-            sum_coeff_x_basis = cls.sum_mul(coeff.flatten(1), basis)
+            sum_coeff_x_basis = cls._dense_evaluate(
+                coeff, x, modes, periods, dense_chunk_elems
+            )
 
         scaling = 1.0 / torch.prod(torch.Tensor(modes))
         return scaling * sum_coeff_x_basis
+
+    @classmethod
+    def _dense_evaluate(
+        cls,
+        coeff: torch.Tensor,
+        x: torch.Tensor,
+        modes: tuple[int, ...],
+        periods: PeriodsInputType,
+        chunk_elems: int,
+    ) -> torch.Tensor:
+        """Exact ``sum_k coeff_k exp(2*pi*i*k*x/L)`` over points ``x``.
+
+        Chunked over the points axis so peak memory is O(chunk * prod(modes))
+        instead of materializing the full (npoints * prod(modes)) basis matrix.
+        Exact (no gridding), unlike the NUFFT path.
+
+        Shapes:
+            coeff   -- (batch, *modes) complex spectrum in fft order.
+            x       -- (npoints, ndim) evaluation points (ndim == len(modes)).
+            modes   -- tuple of length ndim.
+            returns -- (batch, npoints) complex, the unscaled sum (evaluate()
+                       applies the 1/prod(modes) factor).
+        """
+        prod_modes = math.prod(modes)
+        # keep each basis block near chunk_elems complex entries
+        chunk = max(1, chunk_elems // max(1, prod_modes))
+        blocks = []
+        for start in range(0, x.shape[0], chunk):
+            # fn() runs first so its shape assertions fire before coeff.flatten
+            basis = cls.fn(x[start : start + chunk], modes, periods=periods)
+            blocks.append(cls.sum_mul(coeff.flatten(1), basis))
+        return blocks[0] if len(blocks) == 1 else torch.cat(blocks, dim=-1)
 
     @staticmethod
     def sum_mul(coeff_flat: torch.Tensor, basis: torch.Tensor):
