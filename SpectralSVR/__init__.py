@@ -21,6 +21,8 @@ from .utils import (
     zero_coeff as zero_coeff,
     interpolate_tensor as interpolate_tensor,
     SolverSignatureType as SolverSignatureType,
+    etdrk4_solver as etdrk4_solver,
+    resolve_device as resolve_device,
 )
 from .basis import (
     FourierBasis as FourierBasis,
