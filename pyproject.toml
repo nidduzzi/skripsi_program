@@ -5,7 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "matplotlib>=3.11.0,<4",
     "numpy>=2.4.6,<3",
@@ -92,15 +92,14 @@ exclude_also = [
 ]
 
 [tool.mypy]
-# 3.12+: the pinned numpy's type stubs use PEP 695 `type` statements.
-python_version = "3.12"
+python_version = "3.13"
 
 [[tool.mypy.overrides]]
 module = ["torchdiffeq.*", "torchkbnufft.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "B", "W", "C9", "PERF"]
